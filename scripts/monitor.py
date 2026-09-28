@@ -436,8 +436,8 @@ def run_monitor(github, *, api_key, expires_on, notify_user, run_url, now):
         summary = (
             "**Result: NO MATCHES**\n\n"
             f"Live query succeeded. Catalog entries scanned: {catalog_count}.\n\n"
-            "No GPU configurations matched the current non-RTX Blackwell filters "
-            "in your Brev organization's catalog. This is not a platform-wide result."
+            "No monitored GPU configurations were found in your Brev organization's "
+            "catalog. This is not a platform-wide result."
         )
     final_body = issue_body(state, summary, run_url)
     if not issue:
@@ -451,7 +451,7 @@ def run_monitor(github, *, api_key, expires_on, notify_user, run_url, now):
     live_summary = (
         "## Live Brev organization check\n\n"
         f"Check time (UTC): {now.isoformat(timespec='seconds')}\n\n"
-        "Source: Brev catalog for the API key's organization (RTX excluded).\n\n"
+        "Source: Brev catalog for the API key's organization.\n\n"
         + summary + "\n"
     )
     print(live_summary)

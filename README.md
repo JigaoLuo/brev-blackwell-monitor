@@ -31,7 +31,7 @@ Use the **Live Brev organization check** section of the run summary, or the
 time, data source, and one explicit outcome:
 
 - **Result: MATCHES FOUND**: matching GPU configurations are listed with their base prices and API availability.
-- **Result: NO MATCHES**: the live query succeeded, but the API key's organization catalog had no entries matching the current non-RTX Blackwell filters. This is not a platform-wide result.
+- **Result: NO MATCHES**: the live query succeeded, but no monitored GPU configurations were found in the API key's organization catalog. This is not a platform-wide result.
 - **Result: CHECK FAILED**: the query or processing failed, so no inventory conclusion can be drawn. This must not be interpreted as zero matching GPUs.
 
 The **Run unit tests** step uses simulated data and is not a GPU inventory check.
