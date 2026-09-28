@@ -1,7 +1,8 @@
 # Agent guide
 
-Read this file before changing the project. `README.md` is the Chinese,
-human-facing setup and operating guide. Keep it in sync with behavior changes.
+Read this file before changing the project. `README.md` is the human-facing
+setup and operating guide. Keep both guides in English and in sync with behavior
+changes.
 
 ## Purpose and boundaries
 

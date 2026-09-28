@@ -1,72 +1,87 @@
 # Brev Blackwell Monitor
 
-每 30 分钟检查一次 Brev GPU 目录，通过本私有仓库的 GitHub Issue 提醒你。
-仅查询，不创建 GPU 实例，不产生 GPU 租用费用。
+Checks the Brev GPU catalog every 30 minutes and sends alerts through a GitHub
+Issue in this private repository. This is a read-only monitor: it never creates
+GPU instances or incurs GPU rental charges.
 
-本文面向使用者；后续让编程 Agent 修改项目时，请先让它阅读 [AGENTS.md](AGENTS.md)。
+This README is for human users. Coding agents should read [AGENTS.md](AGENTS.md)
+before making changes.
 
-## 先配置 GitHub
+## GitHub setup
 
-1. 打开仓库 **Settings → Secrets and variables → Actions → Secrets → New repository secret**，添加 `BREV_API_KEY`，值为 Brev **Read** API Key。不要把密钥写进文件或聊天。
-2. 在同一页面的 **Variables → New repository variable** 中添加 `BREV_API_KEY_EXPIRES_ON`，值为创建密钥时选择的到期日期，格式 `YYYY-MM-DD`。未配置时，GPU 检查仍会运行，但会提醒你到期提醒尚未启用。
-3. 确认仓库 **Settings → General → Features → Issues** 已启用。默认通知仓库所有者；如果需要通知另一位有仓库访问权限的用户，添加变量 `NOTIFY_USER`，填写用户名，不带 `@`。
-4. 打开 **Actions → Blackwell monitor → Run workflow**，选择 `main` 后运行。首次推送代码也会自动检查；如果首次运行时还没有配置密钥，添加密钥后可重新运行，不必重新推送。
-5. 在自动创建的 **Brev Blackwell monitor** Issue 中点击 **Subscribe**。在 [GitHub 通知设置](https://github.com/settings/notifications) 中启用参与讨论和被提及时的邮件通知，并确认邮箱已验证。首次运行会 `@` 你，便于确认通知渠道。
+1. Open **Settings > Secrets and variables > Actions > Secrets > New repository secret**. Add `BREV_API_KEY` with a Brev **Read** API key. Never put the key in files or chat.
+2. Under **Variables > New repository variable**, add `BREV_API_KEY_EXPIRES_ON` with the expiration date selected when creating the key, in `YYYY-MM-DD` format. Without it, GPU checks still run, but the monitor warns that expiry reminders are not enabled.
+3. Make sure **Settings > General > Features > Issues** is enabled. Alerts mention the repository owner by default. To notify another user with repository access, add a `NOTIFY_USER` variable containing their username without `@`.
+4. Open **Actions > Blackwell monitor > Run workflow**, select `main`, and run it. The initial code push also triggers a check. If that run started before you configured the key, add the secret and rerun the workflow; no new push is needed.
+5. Click **Subscribe** on the automatically created **Brev Blackwell monitor** Issue. Enable email notifications for participation and mentions in [GitHub notification settings](https://github.com/settings/notifications), and verify your email address. The first run mentions you so you can confirm the notification channel.
 
-GitHub Actions 自动提供 `GITHUB_TOKEN`，不需要创建个人 GitHub Token。
-不需要配置 `ORG_ID`，脚本会从 Brev API Key 自动查询组织；已经添加的 `ORG_ID` 变量不会被使用。
-工作流只申请 `contents: read` 和 `issues: write`。
-如果 GitHub API 不可用或工作流在脚本执行前失败，Issue 通知无法送达；
-请同时启用 Actions 失败通知，并留意 Actions 页面。
+GitHub Actions supplies `GITHUB_TOKEN` automatically; no personal GitHub token is
+needed. You do not need `ORG_ID`: the script discovers the organization associated
+with the Brev API key. An existing `ORG_ID` variable is ignored.
+The workflow requests only `contents: read` and `issues: write`.
 
-## 监控内容
+Issue alerts cannot be delivered if the GitHub API is unavailable or the workflow
+fails before the script runs. Enable Actions failure notifications as well, and
+check the Actions page.
 
-- 使用与 [Brev 官方 CLI](https://github.com/brevdev/brev-cli/blob/4d93d635e09f76f6198c2f5a9f26fe7992817a3b/pkg/store/instancetypes.go) 相同的官方服务接口，按 API Key 所属组织查询。不是抓取网页 HTML，也不能保证与网页所有筛选条件完全一致。
-- 检查 GPU 名称：`Blackwell`、B100/B200/B300、GB10/GB200/GB300、RTX PRO 2000/4000/4500/5000/6000（含 Server 命名），以及 RTX 5050/5060/5070/5080/5090。支持 Brev 的 `RTXPro6000` 等别名，不把 `RTX6000Ada`、A6000 或 RTX4090 当成 Blackwell。
-- **首次出现、新配置出现、消失后重新出现，以及 API 可用状态转为 available** 时通知。首次运行已存在的 Blackwell 也会通知。查询包括目录中不可用的型号；通知会区分型号出现和可用状态。
-- 通知会附带当时 API 返回的基础价格；仅价格变化不会单独触发通知。
-- 表格提供 GPU 数量、实例类型、提供商、地区和基础价格。`unknown` 表示 API 未明确返回可用状态。即使显示 `available`，也不保证下单时一定能创建；价格可能因地区变化，存储等费用可能另计。
-- 状态保存在同一个 Issue 的隐藏 JSON 中；无变化只更新状态，不反复发评论。不依赖容易失效的 Actions Cache，也不提交状态文件或保存密钥。
-- Issue 正文只预览前 20 个配置，通知评论会包含本次所有新增或恢复可用的配置及其基础价格；超过 GitHub 单条评论容量时会拆分。
-- 登录失效、接口错误或响应格式变化会使工作流失败，并在 Issue 提醒。失败不会清空上一份成功结果，避免把错误当成“没有 Blackwell”。
-- 密钥到期前 7 天内提醒一次，配置的到期日期已过时再提醒一次。按 UTC 日期计算。更新密钥时也要更新日期变量；脚本不会自动延长或轮换密钥。
+## What is monitored
 
-不要删除状态 Issue、修改标题或隐藏 JSON。关闭 Issue 不会停止监控，下次运行会重新打开。
-如需停止，请在 **Actions → Blackwell monitor → … → Disable workflow** 禁用。
-评论送达后才确认状态；如果 GitHub 在送达后、保存状态前出错，下次可能重复提醒，以免丢失通知。
+- The monitor uses the same official service interfaces as the [Brev CLI](https://github.com/brevdev/brev-cli/blob/4d93d635e09f76f6198c2f5a9f26fe7992817a3b/pkg/store/instancetypes.go), scoped to the API key's organization. It does not scrape HTML and may not exactly reproduce every web-console filter.
+- GPU names matched: `Blackwell`, B100/B200/B300, GB10/GB200/GB300, RTX PRO 2000/4000/4500/5000/6000 (including Server naming), and RTX 5050/5060/5070/5080/5090. Brev aliases such as `RTXPro6000` are supported. `RTX6000Ada`, A6000, and RTX4090 are not classified as Blackwell.
+- Alerts are sent for **initial detections, new configurations, reappearances after absence, and API availability changing to available**. Blackwell listings already present on the first run also trigger an alert. Queries include unavailable catalog entries; notifications distinguish listing presence from availability.
+- Notifications include the base prices reported by the API at that time. Price-only changes do not trigger separate alerts.
+- Tables include GPU count, instance type, provider, locations, and base hourly prices. `unknown` means the API did not explicitly report availability. Even `available` does not guarantee that provisioning will succeed. Prices may vary by region, and storage or other charges may be additional.
+- State is stored as hidden JSON in the same Issue. Unchanged results update the state without repeated comments. The monitor does not depend on an expiring Actions cache, commit state files, or store credentials in its state.
+- The Issue body previews the first 20 configurations. Notification comments include all configurations newly detected or becoming available, together with their base prices. Large notifications are split into multiple comments.
+- Authentication failures, API errors, and unexpected response formats fail the workflow and trigger an Issue alert. Failures preserve the previous successful result instead of treating an error as "no Blackwell GPUs."
+- The monitor sends one reminder within seven days before the configured key expiration date and another after that date has passed, using UTC dates. When replacing a key, update both the secret and the date variable. The script does not extend or rotate keys automatically.
 
-## 运行频率与额度
+Do not delete the state Issue or edit its title or hidden JSON. Closing the Issue
+does not stop monitoring; the next run reopens it. To stop, use
+**Actions > Blackwell monitor > ... > Disable workflow**.
 
-工作流使用 UTC cron `17,47 * * * *`：每小时第 17 和 47 分钟各运行一次，
-避开整点繁忙时段。GitHub 的定时任务可能延迟，不保证严格准时或不会漏过短暂库存。
-默认分支必须是 `main`，工作流才会按当前配置在推送时启动。
+State is acknowledged only after notification comments are delivered. If GitHub
+fails after delivery but before state persistence, the next run may repeat an
+alert rather than risk losing it.
 
-只有一个 Linux job，无第三方 Python 依赖，也不安装浏览器或 Brev CLI。
-单次 job 超时上限为 3 分钟。
-按每次计费 1 分钟估算，30 天约 1,440 分钟，31 天约 1,488 分钟；
-若每次计费 2 分钟则翻倍。最终以 GitHub 的实际用量为准，账号下其他私有仓库也会消耗额度。
+## Schedule and usage
 
-## 本地开发
+The UTC cron expression is `17,47 * * * *`: runs start at minutes 17 and 47 of
+each hour, avoiding the busiest top-of-hour period. GitHub schedules can be
+delayed and are not guaranteed to catch short-lived capacity.
+The push trigger is configured for the `main` branch.
 
-需要 Python 3.10+，只使用标准库。
+There is one Linux job, with no third-party Python dependencies, browser
+installation, or Brev CLI installation. Each job has a three-minute timeout.
+At one billed minute per run, usage is approximately 1,440 minutes over 30 days
+or 1,488 minutes over 31 days. Two billed minutes per run doubles those estimates.
+Actual GitHub usage is authoritative, and other private repositories share the
+account's allowance.
+
+## Local development
+
+Requires Python 3.10+ and uses only the standard library.
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-无密钥、无 GitHub 写操作的公开目录预览：
+Preview the public catalog without credentials or GitHub writes:
 
 ```bash
 python3 scripts/monitor.py --dry-run --public-catalog
 ```
 
-公开目录预览不代表你的组织可租到相同实例。生产工作流始终使用组织目录，
-认证失败时不会偷偷回退到公开目录。
+A public-catalog preview does not prove that your organization can rent the same
+instances. The production workflow always uses the organization catalog and
+never silently falls back to public data when authentication fails.
 
-如果已经通过安全方式设置了 `BREV_API_KEY` 环境变量，可以只读预览组织目录：
+If `BREV_API_KEY` is already supplied securely through your environment, preview
+the organization catalog without GitHub writes:
 
 ```bash
 python3 scripts/monitor.py --dry-run
 ```
 
-脚本只允许固定服务地址，不输出密钥或原始错误响应，也不会跟随重定向发送认证信息。
+The script uses fixed service endpoints, does not print credentials or raw error
+responses, and does not follow redirects that could forward authentication data.
