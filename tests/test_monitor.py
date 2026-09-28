@@ -2,6 +2,8 @@ import copy
 from datetime import datetime, timezone
 import io
 import json
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
@@ -214,6 +216,10 @@ class StateTests(unittest.TestCase):
 
 class DeliveryTests(unittest.TestCase):
     def setUp(self):
+        # CI supplies a real summary file; simulated checks must not publish to it.
+        summary_env = patch.dict(m.os.environ, {"GITHUB_STEP_SUMMARY": ""})
+        summary_env.start()
+        self.addCleanup(summary_env.stop)
         self.github = Mock()
         self.github.find_issue.return_value = None
         self.github.create_issue.return_value = {"number": 1}
@@ -223,12 +229,37 @@ class DeliveryTests(unittest.TestCase):
             "now": NOW,
         }
 
+    def test_mock_checks_disable_actions_summary(self):
+        self.assertEqual(m.os.environ.get("GITHUB_STEP_SUMMARY"), "")
+
+    @patch.object(m, "fetch_catalog", return_value=[instance("H100")])
+    @patch("builtins.print")
+    def test_live_summary_identifies_source_and_contains_only_current_result(self, _print, _fetch):
+        with tempfile.TemporaryDirectory() as directory:
+            summary_path = Path(directory) / "summary.md"
+            with patch.dict(m.os.environ, {"GITHUB_STEP_SUMMARY": str(summary_path)}):
+                m.run_monitor(self.github, **self.kwargs)
+            summary = summary_path.read_text(encoding="utf-8")
+        self.assertIn("## Live Brev organization check", summary)
+        self.assertIn("API key's organization", summary)
+        self.assertIn("RTX excluded", summary)
+        self.assertIn(NOW.isoformat(timespec="seconds"), summary)
+        self.assertEqual(summary.count("**Result: NO MATCHES**"), 1)
+        self.assertIn("Live query succeeded. Catalog entries scanned: 1.", summary)
+        self.assertIn("No GPU configurations matched", summary)
+        self.assertNotIn("Missing BREV_API_KEY", summary)
+        self.assertNotIn("region-a", summary)
+        self.assertNotIn("USD 4.00/h", summary)
+
     @patch.object(m, "fetch_catalog", return_value=[instance()])
     @patch("builtins.print")
     def test_initial_alert_and_repeated_check(self, _print, _fetch):
         m.run_monitor(self.github, **self.kwargs)
         body = self.github.update_issue.call_args.args[1]
         comment = self.github.comment.call_args.args[1]
+        self.assertIn("**Result: MATCHES FOUND**", body)
+        self.assertIn("Matching GPU configurations: 1.", body)
+        self.assertIn("USD 4.00/h", body)
         self.assertIn("@example", comment)
         self.assertIn("Blackwell listings", comment)
         self.assertNotIn("bak-test", body + comment)
@@ -243,7 +274,10 @@ class DeliveryTests(unittest.TestCase):
         with self.assertRaises(m.MonitorError):
             m.run_monitor(self.github, **self.kwargs)
         self.assertIn("Monitoring failed", self.github.comment.call_args.args[1])
-        state = m.decode_state(self.github.update_issue.call_args.args[1])
+        body = self.github.update_issue.call_args.args[1]
+        self.assertIn("**Result: CHECK FAILED**", body)
+        self.assertNotIn("**Result: NO MATCHES**", body)
+        state = m.decode_state(body)
         self.assertEqual(state["error"], "Missing BREV_API_KEY")
 
     @patch.object(m, "fetch_catalog", return_value=[instance()])

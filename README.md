@@ -24,6 +24,21 @@ Issue alerts cannot be delivered if the GitHub API is unavailable or the workflo
 fails before the script runs. Enable Actions failure notifications as well, and
 check the Actions page.
 
+## Reading workflow results
+
+Use the **Live Brev organization check** section of the run summary, or the
+**Check Brev and notify** step, for actual results. The summary includes the check
+time, data source, and one explicit outcome:
+
+- **Result: MATCHES FOUND**: matching GPU configurations are listed with their base prices and API availability.
+- **Result: NO MATCHES**: the live query succeeded, but the API key's organization catalog had no entries matching the current non-RTX Blackwell filters. This is not a platform-wide result.
+- **Result: CHECK FAILED**: the query or processing failed, so no inventory conclusion can be drawn. This must not be interpreted as zero matching GPUs.
+
+The **Run unit tests** step uses simulated data and is not a GPU inventory check.
+Test fixtures such as provider `example`, location `region-a`, and price
+`USD 4.00/h` are not real offers. Tests must not write their results to the
+live monitoring summary.
+
 ## What is monitored
 
 - The monitor uses the same official service interfaces as the [Brev CLI](https://github.com/brevdev/brev-cli/blob/4d93d635e09f76f6198c2f5a9f26fe7992817a3b/pkg/store/instancetypes.go), scoped to the API key's organization. It does not scrape HTML and may not exactly reproduce every web-console filter.

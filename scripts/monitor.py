@@ -408,19 +408,37 @@ def run_monitor(github, *, api_key, expires_on, notify_user, run_url, now):
     issue = github.find_issue()
     previous = decode_state(issue["body"]) if issue else initial_state()
     matches = None
+    catalog_count = None
     error = ""
     try:
-        matches = find_blackwell(fetch_catalog(api_key))
+        items = fetch_catalog(api_key)
+        catalog_count = len(items)
+        matches = find_blackwell(items)
     except MonitorError as exc:
         error = str(exc)
     state, alerts = evaluate(
         previous, now=now, expires_on=expires_on, matches=matches, error=error,
     )
-    summary = (
-        "**Check failed:** " + safe_text(error)
-        if error else
-        f"Found {len(matches)} matching configuration(s).\n\n" + match_table(matches)
-    )
+    if error:
+        summary = (
+            "**Result: CHECK FAILED**\n\n" + safe_text(error)
+            + "\n\nNo inventory conclusion was reached. This is not a no-match result."
+        )
+    elif matches:
+        summary = (
+            "**Result: MATCHES FOUND**\n\n"
+            f"Catalog entries scanned: {catalog_count}. "
+            f"Matching GPU configurations: {len(matches)}.\n\n"
+            + match_table(matches)
+            + "\n\nA catalog match does not guarantee rentable capacity."
+        )
+    else:
+        summary = (
+            "**Result: NO MATCHES**\n\n"
+            f"Live query succeeded. Catalog entries scanned: {catalog_count}.\n\n"
+            "No GPU configurations matched the current non-RTX Blackwell filters "
+            "in your Brev organization's catalog. This is not a platform-wide result."
+        )
     final_body = issue_body(state, summary, run_url)
     if not issue:
         # Save an unacknowledged state until the alert comment has been delivered.
@@ -430,11 +448,17 @@ def run_monitor(github, *, api_key, expires_on, notify_user, run_url, now):
     for comment in notification_comments(alerts, notify_user, run_url):
         github.comment(issue["number"], comment)
     github.update_issue(issue["number"], final_body)
-    print(summary)
+    live_summary = (
+        "## Live Brev organization check\n\n"
+        f"Check time (UTC): {now.isoformat(timespec='seconds')}\n\n"
+        "Source: Brev catalog for the API key's organization (RTX excluded).\n\n"
+        + summary + "\n"
+    )
+    print(live_summary)
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary_path:
         with open(summary_path, "a", encoding="utf-8") as handle:
-            handle.write(summary + "\n")
+            handle.write(live_summary)
     if error:
         raise MonitorError(error)
 

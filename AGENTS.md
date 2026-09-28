@@ -140,6 +140,11 @@ dry-run when catalog parsing changes, but confirm production separately through
 an authenticated workflow run. Confirm notifications include price information
 and no provisioning calls exist.
 
+Tests invoking `run_monitor` must isolate `GITHUB_STEP_SUMMARY` from the CI
+environment. Disable it for mocked delivery checks, or point it to a temporary
+file when explicitly testing summary output. Never publish simulated inventory
+or expected test failures into the live Actions summary.
+
 Update the human README when setup, matching, schedule, or alert semantics change.
 Do not claim a deployment is working based only on local tests or a successful
 push. Confirm the Actions result, or explicitly state that it is still unknown.
