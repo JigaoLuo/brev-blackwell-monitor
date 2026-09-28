@@ -86,9 +86,12 @@ Public catalog access is explicitly limited to `--dry-run --public-catalog`.
 
 ## State and notification invariants
 
-- `GPU_PATTERN` matches Blackwell model names, including Brev's compact
-  `RTXPro6000` alias. Exclude RTX6000Ada, A6000, H100/H200, and RTX4090.
-  Add positive and negative tests when changing matching rules.
+- `GPU_PATTERN` matches B100/B200/B300, GB10/GB200/GB300, and explicit Blackwell
+  names. `find_blackwell` excludes every name containing `RTX`, case-insensitively,
+  before accepting a match. This exclusion also applies to RTX PRO, Server,
+  compact aliases such as `RTXPro6000`, and names containing `Blackwell`.
+  Exclude A6000 and H100/H200 as well. Add positive and negative tests when
+  changing matching rules.
 - Merge duplicate instance entries by provider, type, normalized GPU name, and
   GPU count. Aggregate regions, prices, and availability; response order must
   not produce spurious alerts.

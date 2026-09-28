@@ -27,7 +27,7 @@ check the Actions page.
 ## What is monitored
 
 - The monitor uses the same official service interfaces as the [Brev CLI](https://github.com/brevdev/brev-cli/blob/4d93d635e09f76f6198c2f5a9f26fe7992817a3b/pkg/store/instancetypes.go), scoped to the API key's organization. It does not scrape HTML and may not exactly reproduce every web-console filter.
-- GPU names matched: `Blackwell`, B100/B200/B300, GB10/GB200/GB300, RTX PRO 2000/4000/4500/5000/6000 (including Server naming), and RTX 5050/5060/5070/5080/5090. Brev aliases such as `RTXPro6000` are supported. `RTX6000Ada`, A6000, and RTX4090 are not classified as Blackwell.
+- GPU names matched: B100/B200/B300, GB10/GB200/GB300, and other non-RTX GPU names explicitly containing `Blackwell`. **All RTX models are excluded**, including RTX PRO, Server, and GeForce variants, even when their names contain `Blackwell`. A6000 and H100/H200 are also not matched.
 - Alerts are sent for **initial detections, new configurations, reappearances after absence, and API availability changing to available**. Blackwell listings already present on the first run also trigger an alert. Queries include unavailable catalog entries; notifications distinguish listing presence from availability.
 - Notifications include the base prices reported by the API at that time. Price-only changes do not trigger separate alerts.
 - Tables include GPU count, instance type, provider, locations, and base hourly prices. `unknown` means the API did not explicitly report availability. Even `available` does not guarantee that provisioning will succeed. Prices may vary by region, and storage or other charges may be additional.

@@ -26,10 +26,21 @@ def instance(name="NVIDIA B200", available=True, **changes):
 class CatalogTests(unittest.TestCase):
     def test_blackwell_aliases(self):
         for name in ("Blackwell", "NVIDIA B100", "B200", "B300", "GB200 NVL72",
-                     "GB300", "GB10", "RTXPro6000", "RTX PRO Server 6000",
-                     "RTX PRO 4500", "RTX PRO 5000", "RTX5090", "RTX 5070 Ti"):
+                     "GB300", "GB10", "NVIDIA Blackwell B200", "gb200"):
             with self.subTest(name=name):
                 self.assertEqual(len(m.find_blackwell([instance(name)])), 1)
+
+    def test_all_rtx_models_are_excluded_even_with_blackwell_in_name(self):
+        names = [
+            "RTXPro6000", "RTX PRO Server 6000", "RTX5090", "RTX 5070 Ti",
+            "RTX 5090D", "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+            "NVIDIA Blackwell rTx 5090", "Blackwell RTXPro6000",
+        ]
+        names.extend(f"RTX PRO {model}" for model in (2000, 4000, 4500, 5000, 6000))
+        names.extend(f"RTX {model} Blackwell" for model in (5050, 5060, 5070, 5080, 5090))
+        for name in names:
+            with self.subTest(name=name):
+                self.assertEqual(m.find_blackwell([instance(name)]), [])
 
     def test_non_blackwell_is_not_matched(self):
         for name in ("H100", "H200", "A6000", "RTX6000Ada", "RTX 6000",

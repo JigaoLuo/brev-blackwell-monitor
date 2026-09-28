@@ -25,10 +25,7 @@ STATE_START = "<!-- brev-blackwell-monitor-state\n"
 STATE_END = "\n-->"
 GPU_PATTERN = re.compile(
     r"\bblackwell\b"
-    r"|\b(?:B100|B200|B300|GB10|GB200|GB300)\b"
-    r"|\bRTX[\s_-]*PRO[\s_-]*(?:Server[\s_-]*)?"
-    r"(?:6000|5000|4500|4000|2000)\b"
-    r"|\bRTX[\s_-]*50(?:50|60|70|80|90)(?:[\s_-]*(?:Ti|D))?\b",
+    r"|\b(?:B100|B200|B300|GB10|GB200|GB300)\b",
     re.IGNORECASE,
 )
 
@@ -171,7 +168,7 @@ def find_blackwell(items):
                 raise MonitorError("Brev GPU catalog: invalid GPU entry.")
             name = text_field(gpu.get("name"), "GPU name", required=True)
             saw_gpu = True
-            if not GPU_PATTERN.search(name):
+            if "rtx" in name.casefold() or not GPU_PATTERN.search(name):
                 continue
             count = gpu.get("count")
             if type(count) is not int or count < 1:
