@@ -96,14 +96,35 @@ The UTC cron expression is `17,47 * * * *`: runs start at minutes 17 and 47 of
 each hour, avoiding the busiest top-of-hour period. GitHub schedules are best
 effort: under load, scheduled runs are delayed or skipped entirely, and gaps of
 several hours have been observed. They are not guaranteed to catch short-lived
-capacity. For tighter timing, trigger the workflow through `workflow_dispatch`
-from an external scheduler.
+capacity.
+
+For reliable timing, the Cloudflare Worker in [`cloudflare/`](cloudflare/)
+triggers the workflow through `workflow_dispatch` at minutes 7 and 37 (UTC).
+To set it up:
+
+1. Create a GitHub **fine-grained personal access token** limited to this
+   repository, with **Actions: Read and write** permission only.
+2. In the Cloudflare dashboard, create a Worker named `brev-blackwell-dispatch`
+   and replace its code with [`cloudflare/dispatch-worker.js`](cloudflare/dispatch-worker.js).
+3. Under the Worker's **Settings > Variables and Secrets**, add a **Secret**
+   named `GITHUB_TOKEN` containing the token.
+4. Under **Settings > Trigger events**, add a **Cron Trigger** `7,37 * * * *`.
+
+Alternatively, deploy with `npx wrangler deploy` from `cloudflare/` and set the
+secret with `npx wrangler secret put GITHUB_TOKEN`. The Worker has no HTTP
+endpoint, so its URL cannot trigger runs. Runs started by the Worker appear in
+Actions with the `workflow_dispatch` event. The GitHub schedule stays as a
+backup; runs are serialized, so overlapping triggers are safe. When the token
+expires, dispatched runs stop silently; the Cloudflare dashboard shows the
+failed cron invocations.
 The push trigger is configured for the `main` branch.
 
 There is one Linux job, with no third-party Python dependencies, browser
 installation, or Brev CLI installation. Each job has a three-minute timeout.
 At one billed minute per run, usage is approximately 1,440 minutes over 30 days
-or 1,488 minutes over 31 days. Two billed minutes per run doubles those estimates.
+or 1,488 minutes over 31 days for the 30-minute cadence. Two billed minutes per
+run doubles those estimates. GitHub's backup schedule adds its own runs on top
+of the Cloudflare triggers.
 Actual GitHub usage is authoritative, and other private repositories share the
 account's allowance.
 

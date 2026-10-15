@@ -25,6 +25,11 @@ Report the API's base hourly price; do not describe it as a complete quote.
   transitions, auto-start, GitHub Issue delivery, and CLI entry point.
 - `.github/workflows/monitor.yml`: one Linux job, every 30 minutes, plus manual
   dispatch and relevant pushes to `main`. UTC cron is `17,47 * * * *`.
+- `cloudflare/`: a Cloudflare Worker whose Cron Trigger (`7,37 * * * *` UTC)
+  calls `workflow_dispatch`, because GitHub's `schedule` often skips runs. It
+  has no `fetch` handler; keep it that way so the public URL cannot trigger runs.
+  Its `GITHUB_TOKEN` secret is a fine-grained PAT with Actions write access to
+  this repository only. Deployment happens in Cloudflare, not through this repo.
 - `tests/test_monitor.py`: standard-library `unittest` tests; no live credentials.
 - `README.md`: setup, notifications, monitoring semantics, limits, and local use.
 - `AGENTS.md`: development instructions and invariants for future agents.
