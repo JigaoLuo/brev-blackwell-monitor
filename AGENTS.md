@@ -6,9 +6,13 @@ changes.
 
 ## Purpose and boundaries
 
-This is a notification-only Blackwell GPU catalog monitor for NVIDIA Brev.
-It must never create, rent, reserve, purchase, or modify GPU instances, including
-as a way to test availability. A Read-only Brev API key is sufficient.
+This is a Blackwell GPU catalog monitor for NVIDIA Brev with auto-start. At the
+owner's request, the workflow arms auto-start by default with label `1` when the
+`BREV_AUTOSTART` repository variable is unset; `0`/`false`/`off`/`no` disables it.
+It may create **at most one** instance per arm label (see "Auto-start invariants"). It must never create instances in any
+other path, never stop, delete, or modify instances, and never create one to
+test availability. Auto-start needs a Read & Write Brev API key; with it
+disarmed, a Read-only key is sufficient.
 
 The production source is the organization associated with the API key, not a
 scraped browser page. Catalog presence and an API availability flag are not
@@ -18,7 +22,7 @@ Report the API's base hourly price; do not describe it as a complete quote.
 ## Repository map
 
 - `scripts/monitor.py`: HTTP clients, catalog parsing, model detection, state
-  transitions, GitHub Issue delivery, and CLI entry point.
+  transitions, auto-start, GitHub Issue delivery, and CLI entry point.
 - `.github/workflows/monitor.yml`: one Linux job, every 30 minutes, plus manual
   dispatch and relevant pushes to `main`. UTC cron is `17,47 * * * *`.
 - `tests/test_monitor.py`: standard-library `unittest` tests; no live credentials.
@@ -53,9 +57,10 @@ paste a key into chat, command history, source files, or test fixtures.
 
 | Name | Location | Meaning |
 | --- | --- | --- |
-| `BREV_API_KEY` | Actions repository secret | Brev Read API key, `bak-` prefix |
+| `BREV_API_KEY` | Actions repository secret | Brev API key, `bak-` prefix; Read & Write for auto-start |
 | `BREV_API_KEY_EXPIRES_ON` | Actions repository variable | `YYYY-MM-DD` expiry date |
 | `NOTIFY_USER` | Optional Actions repository variable | Username without `@`; defaults to owner |
+| `BREV_AUTOSTART` | Optional Actions repository variable | Arm label; the workflow defaults it to `1`. `0`/`false`/`off`/`no` disables. The script treats an empty value as disabled |
 | `GITHUB_TOKEN` | Automatically supplied by Actions | Issue reads/writes in this repository |
 
 `ORG_ID` is not read. `fetch_catalog` resolves the key's single organization using
@@ -79,6 +84,16 @@ These interfaces were traced from the official CLI:
 
 - [Catalog queries](https://github.com/brevdev/brev-cli/blob/4d93d635e09f76f6198c2f5a9f26fe7992817a3b/pkg/store/instancetypes.go)
 - [Organization discovery](https://github.com/brevdev/brev-cli/blob/4d93d635e09f76f6198c2f5a9f26fe7992817a3b/pkg/store/organization.go)
+- [Instance list and creation](https://github.com/brevdev/brev-cli/blob/45bd8d47e9dcd10186797763f53c74fd3fb15d2a/pkg/store/workspace.go)
+  and [`brev create` defaults](https://github.com/brevdev/brev-cli/blob/45bd8d47e9dcd10186797763f53c74fd3fb15d2a/pkg/cmd/gpucreate/gpucreate.go)
+
+Auto-start lists instances with
+`GET https://brevapi.us-west-2-prod.control-plane.brev.dev/api/organizations/<org>/workspaces`
+and creates one with `POST` to the same path. The body mirrors brev-cli
+`NewCreateWorkspacesOptions` plus `gpucreate` for API-key auth: VM mode with
+Jupyter, workspace class `2x8`, template `4nbb4lg2s`, disk `120Gi`, and the
+listing's `cloudCredId`. `brev create` does not send a location for a plain
+instance type, so neither does the monitor.
 
 If the API changes, verify the official source and update fixtures and parsing.
 Do not silently substitute a public catalog for an authentication failure.
@@ -86,8 +101,11 @@ Public catalog access is explicitly limited to `--dry-run --public-catalog`.
 
 ## State and notification invariants
 
-- `GPU_PATTERN` matches B100/B200/B300, GB10/GB200/GB300, and explicit Blackwell
-  names. `find_blackwell` excludes every name containing `RTX`, case-insensitively,
+- `GPU_PATTERN` matches only B200 and B300 as whole words. B100, GB10, GB200,
+  GB300, and names that only say `Blackwell` are intentionally not matched.
+  Only GPU count `GPU_COUNT` (1) is accepted; multi-GPU entries are skipped
+  after the count is validated, so an invalid count is still an error.
+  `find_blackwell` excludes every name containing `RTX`, case-insensitively,
   before accepting a match. This exclusion also applies to RTX PRO, Server,
   compact aliases such as `RTXPro6000`, and names containing `Blackwell`.
   Exclude A6000 and H100/H200 as well. Add positive and negative tests when
@@ -99,9 +117,11 @@ Public catalog access is explicitly limited to `--dry-run --public-catalog`.
 - State lives in the hidden JSON marker in the bot-created
   `Brev Blackwell monitor` Issue. Search includes closed issues and paginates;
   closing the issue does not disable monitoring.
-- State schema version 1 contains `matches`, `error`, `expiry_notice`, and
-  `last_success`. A damaged or unsupported state is an error, not an empty
-  baseline. Schema changes require migration or an explicit recovery procedure.
+- State schema version 2 contains `matches`, `error`, `expiry_notice`,
+  `last_success`, `autostart` (the consumed arm label), and `autostart_error`.
+  Version 1 is migrated in `decode_state` with empty auto-start fields. A damaged
+  or unsupported state is an error, not an empty baseline. Schema changes
+  require migration or an explicit recovery procedure.
 - Alert on a newly observed identity, reappearance after a successful absent
   observation, or a transition to `available`. Price-only changes do not alert.
 - An unsuccessful catalog query preserves the last successful GPU state and
@@ -118,6 +138,24 @@ Public catalog access is explicitly limited to `--dry-run --public-catalog`.
 - Serialize workflow runs with a single concurrency group and do not cancel an
   in-progress state update. Do not replace Issue state with an expiring cache.
 
+## Auto-start invariants
+
+- Auto-start runs only in the scheduled/dispatched workflow path, never in
+  `--dry-run`, and only after a successful catalog query. A catalog failure,
+  invalid `BREV_AUTOSTART`, or missing `cloudCredId` never creates anything.
+- Candidates are monitored matches (same B200/B300 single-GPU rules) whose
+  listing has `isAvailable: true`, sorted cheapest base price first. There is
+  intentionally no price cap; the owner chose this.
+- One instance per arm label. The instance name is `blackwell-auto-<label>`.
+  Before creating, list the organization's instances; an existing instance with
+  that name consumes the label without creating another. This name check is
+  what makes reruns, crashes after creation, and failed notifications safe.
+- Never retry the creation `POST`. A failure leaves the label armed and alerts
+  once per distinct error; the next run rechecks by name before trying again.
+- After a start, record the label in state. The owner re-arms by setting
+  `BREV_AUTOSTART` to a new value. The monitor never stops or deletes instances;
+  notifications must say that billing continues until the owner stops it.
+
 ## Failure handling and credential safety
 
 Use `MonitorError` for sanitized, actionable errors. Never print authentication
@@ -125,8 +163,8 @@ headers, credential values, or raw server error bodies. Reject redirects so an
 Authorization header cannot be forwarded elsewhere.
 
 Only retry reads/read-only RPCs, with bounded timeouts and backoff. Do not blindly
-retry Issue-creation or notification POSTs: the server may have accepted a timed
-out request. Do not treat malformed data or missing authentication as zero GPUs.
+retry Issue-creation, notification, or instance-creation POSTs: the server may
+have accepted a timed out request. Do not treat malformed data or missing authentication as zero GPUs.
 
 Keep workflow permissions at `contents: read` and `issues: write`, keep checkout
 pinned to a reviewed commit, and do not persist checkout credentials. Do not add
@@ -138,7 +176,8 @@ Run the unit suite. Cover any changes to aliases, payload schema, deduplication,
 failure recovery, expiry boundaries, and notification delivery. Use the public
 dry-run when catalog parsing changes, but confirm production separately through
 an authenticated workflow run. Confirm notifications include price information
-and no provisioning calls exist.
+and that the auto-start creation call remains the only provisioning call. Tests
+must mock every Brev request; never exercise auto-start against the live API.
 
 Tests invoking `run_monitor` must isolate `GITHUB_STEP_SUMMARY` from the CI
 environment. Disable it for mocked delivery checks, or point it to a temporary

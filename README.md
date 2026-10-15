@@ -1,15 +1,17 @@
 # Brev Blackwell Monitor
 
 Checks the Brev GPU catalog every 30 minutes and sends alerts through a GitHub
-Issue in this private repository. This is a read-only monitor: it never creates
-GPU instances or incurs GPU rental charges.
+Issue in this private repository. [Auto-start](#auto-start) is **on by default**:
+it starts **one** B200/B300 single-GPU instance when one becomes available, which
+**incurs GPU rental charges** until you stop it. Set `BREV_AUTOSTART` to `0` to
+only receive notifications.
 
 This README is for human users. Coding agents should read [AGENTS.md](AGENTS.md)
 before making changes.
 
 ## GitHub setup
 
-1. Open **Settings > Secrets and variables > Actions > Secrets > New repository secret**. Add `BREV_API_KEY` with a Brev **Read** API key. Never put the key in files or chat.
+1. Open **Settings > Secrets and variables > Actions > Secrets > New repository secret**. Add `BREV_API_KEY` with a Brev API key: **Read** is enough for notifications; auto-start needs **Read & Write**. Never put the key in files or chat.
 2. Under **Variables > New repository variable**, add `BREV_API_KEY_EXPIRES_ON` with the expiration date selected when creating the key, in `YYYY-MM-DD` format. Without it, GPU checks still run, but the monitor warns that expiry reminders are not enabled.
 3. Make sure **Settings > General > Features > Issues** is enabled. Alerts mention the repository owner by default. To notify another user with repository access, add a `NOTIFY_USER` variable containing their username without `@`.
 4. Open **Actions > Blackwell monitor > Run workflow**, select `main`, and run it. The initial code push also triggers a check. If that run started before you configured the key, add the secret and rerun the workflow; no new push is needed.
@@ -42,7 +44,7 @@ live monitoring summary.
 ## What is monitored
 
 - The monitor uses the same official service interfaces as the [Brev CLI](https://github.com/brevdev/brev-cli/blob/4d93d635e09f76f6198c2f5a9f26fe7992817a3b/pkg/store/instancetypes.go), scoped to the API key's organization. It does not scrape HTML and may not exactly reproduce every web-console filter.
-- GPU names matched: B100/B200/B300, GB10/GB200/GB300, and other non-RTX GPU names explicitly containing `Blackwell`. **All RTX models are excluded**, including RTX PRO, Server, and GeForce variants, even when their names contain `Blackwell`. A6000 and H100/H200 are also not matched.
+- GPU names matched: **B200 and B300 only**, and only **single-GPU (1x) configurations**; multi-GPU listings such as `B300x8` are ignored. Other Blackwell models (B100, GB10, GB200, GB300) and names that only say `Blackwell` are not matched. **All RTX models are excluded**, including RTX PRO, Server, and GeForce variants, even when their names contain `Blackwell`. A6000 and H100/H200 are also not matched.
 - Alerts are sent for **initial detections, new configurations, reappearances after absence, and API availability changing to available**. Blackwell listings already present on the first run also trigger an alert. Queries include unavailable catalog entries; notifications distinguish listing presence from availability.
 - Notifications include the base prices reported by the API at that time. Price-only changes do not trigger separate alerts.
 - Tables include GPU count, instance type, provider, locations, and base hourly prices. `unknown` means the API did not explicitly report availability. Even `available` does not guarantee that provisioning will succeed. Prices may vary by region, and storage or other charges may be additional.
@@ -59,11 +61,43 @@ State is acknowledged only after notification comments are delivered. If GitHub
 fails after delivery but before state persistence, the next run may repeat an
 alert rather than risk losing it.
 
+## Auto-start
+
+On by default and requires a **Read & Write** `BREV_API_KEY`. Without a
+`BREV_AUTOSTART` repository variable, the workflow uses the arm label `1`. To
+use another label, set `BREV_AUTOSTART` to 1-20 lowercase letters, digits, or
+hyphens.
+
+On the next successful check where a monitored configuration (B200/B300, single
+GPU) is listed with API availability `available`, the monitor creates one
+instance named `blackwell-auto-<label>` using the cheapest such listing. There is
+**no price cap**. It uses the same defaults as `brev create`: VM mode with
+Jupyter and a 120 GiB disk. You are mentioned in an **Instance started** comment
+with the instance ID, type, and base price.
+
+- **One instance per label.** After a start, that label is used up; to allow
+  another start, change `BREV_AUTOSTART` to a new value such as `2`.
+- **Duplicate protection.** Before creating, the monitor checks whether an
+  instance named `blackwell-auto-<label>` already exists. Reruns, crashes, or
+  failed notifications therefore cannot start a second instance for the same label.
+- **Failures.** A failed start (for example, capacity disappeared) is reported
+  once and retried on the next run. Creation requests are never retried within a
+  run. If a request timed out, check the Brev console; the next run detects the
+  instance by name.
+- **Billing.** The monitor never stops or deletes instances. Stop or delete the
+  instance in the Brev console when you are done.
+- To disable, add the repository variable `BREV_AUTOSTART` with value `0`
+  (`false`, `off`, or `no` also work). Deleting the variable turns auto-start
+  back on with label `1`. `--dry-run` never starts instances.
+
 ## Schedule and usage
 
 The UTC cron expression is `17,47 * * * *`: runs start at minutes 17 and 47 of
-each hour, avoiding the busiest top-of-hour period. GitHub schedules can be
-delayed and are not guaranteed to catch short-lived capacity.
+each hour, avoiding the busiest top-of-hour period. GitHub schedules are best
+effort: under load, scheduled runs are delayed or skipped entirely, and gaps of
+several hours have been observed. They are not guaranteed to catch short-lived
+capacity. For tighter timing, trigger the workflow through `workflow_dispatch`
+from an external scheduler.
 The push trigger is configured for the `main` branch.
 
 There is one Linux job, with no third-party Python dependencies, browser

@@ -1,4 +1,4 @@
-"""Read Brev's GPU catalog and deliver deduplicated GitHub Issue alerts."""
+"""Read Brev's GPU catalog, deliver GitHub Issue alerts, and optionally start one GPU."""
 
 import argparse
 import copy
@@ -23,11 +23,15 @@ CONSOLE_URL = "https://brev.nvidia.com/environment/new"
 ISSUE_TITLE = "Brev Blackwell monitor"
 STATE_START = "<!-- brev-blackwell-monitor-state\n"
 STATE_END = "\n-->"
-GPU_PATTERN = re.compile(
-    r"\bblackwell\b"
-    r"|\b(?:B100|B200|B300|GB10|GB200|GB300)\b",
-    re.IGNORECASE,
-)
+GPU_PATTERN = re.compile(r"\b(?:B200|B300)\b", re.IGNORECASE)
+# Only single-GPU configurations are monitored; multi-GPU listings are ignored.
+GPU_COUNT = 1
+# Auto-start mirrors the defaults of brev-cli `brev create` for API-key auth.
+AUTOSTART_PREFIX = "blackwell-auto-"
+AUTOSTART_OFF = ("", "0", "false", "off", "no", "disabled")
+WORKSPACE_CLASS_ID = "2x8"
+WORKSPACE_TEMPLATE_ID = "4nbb4lg2s"
+WORKSPACE_DISK = "120Gi"
 
 
 class MonitorError(Exception):
@@ -83,6 +87,27 @@ def request_json(method, url, *, label, token="", body=None, retry=False,
     raise MonitorError(f"{label}: request did not complete.")
 
 
+def check_api_key(api_key):
+    if not api_key:
+        raise MonitorError("Missing BREV_API_KEY repository secret.")
+    if not api_key.startswith("bak-"):
+        raise MonitorError("BREV_API_KEY must be a Brev API key, starting with bak-.")
+
+
+def resolve_org(api_key):
+    check_api_key(api_key)
+    orgs = request_json(
+        "GET", BREV_ORGS_URL, label="Brev organization lookup",
+        token=api_key, retry=True,
+    )
+    if (not isinstance(orgs, list) or len(orgs) != 1
+            or not isinstance(orgs[0], dict)
+            or not isinstance(orgs[0].get("id"), str)
+            or not orgs[0]["id"]):
+        raise MonitorError("Brev API key must resolve to exactly one organization.")
+    return orgs[0]["id"]
+
+
 def fetch_catalog(api_key, *, public=False):
     options = {
         "includeCpu": False,
@@ -96,21 +121,8 @@ def fetch_catalog(api_key, *, public=False):
         method = "ListPublicInstanceType"
         token = ""
     else:
-        if not api_key:
-            raise MonitorError("Missing BREV_API_KEY repository secret.")
-        if not api_key.startswith("bak-"):
-            raise MonitorError("BREV_API_KEY must be a Brev API key, starting with bak-.")
-        orgs = request_json(
-            "GET", BREV_ORGS_URL, label="Brev organization lookup",
-            token=api_key, retry=True,
-        )
-        if (not isinstance(orgs, list) or len(orgs) != 1
-                or not isinstance(orgs[0], dict)
-                or not isinstance(orgs[0].get("id"), str)
-                or not orgs[0]["id"]):
-            raise MonitorError("Brev API key must resolve to exactly one organization.")
         method = "ListOrganizationAvailableInstanceTypes"
-        body["organizationId"] = orgs[0]["id"]
+        body["organizationId"] = resolve_org(api_key)
         token = api_key
     response = request_json(
         "POST", BREV_INSTANCE_URL + method, label="Brev GPU catalog",
@@ -173,6 +185,8 @@ def find_blackwell(items):
             count = gpu.get("count")
             if type(count) is not int or count < 1:
                 raise MonitorError("Brev GPU catalog: invalid GPU count.")
+            if count != GPU_COUNT:
+                continue
             provider = text_field(item.get("provider", ""), "provider") or "unknown"
             identity = [provider.casefold(), instance_type.casefold(),
                         re.sub(r"[\s_-]+", "", name.casefold()), count]
@@ -207,6 +221,131 @@ def find_blackwell(items):
     return sorted(matches.values(), key=lambda m: (m.gpu, m.provider, m.instance_type))
 
 
+def autostart_label(value):
+    label = value.strip().lower()
+    if label in AUTOSTART_OFF:
+        return ""
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,18}[a-z0-9])?", label):
+        raise MonitorError("BREV_AUTOSTART must be 1-20 lowercase letters, digits, "
+                           "or hyphens (for example `1`); auto-start is disabled.")
+    return label
+
+
+def autostart_candidates(items):
+    """Return available monitored configurations, cheapest first."""
+    candidates = []
+    for item in items:
+        if not item.get("supportedGpus") or item.get("isAvailable") is not True:
+            continue
+        for match in find_blackwell([item]):
+            price = item.get("basePrice") or {}
+            try:
+                cost = float(price.get("amount", ""))
+            except ValueError:
+                cost = float("inf")
+            candidates.append({
+                "instance_type": match.instance_type, "gpu": match.gpu,
+                "provider": match.provider, "cost": cost,
+                "price": ", ".join(sorted(match.prices)) or "not reported",
+                "cloud_cred_id": item.get("cloudCredId"),
+            })
+    return sorted(candidates, key=lambda c: (c["cost"], c["instance_type"]))
+
+
+def workspaces_url(org_id):
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", org_id):
+        raise MonitorError("Brev organization ID has an unexpected format.")
+    return f"{BREV_ORGS_URL}/{org_id}/workspaces"
+
+
+def list_workspaces(api_key, org_id):
+    workspaces = request_json(
+        "GET", workspaces_url(org_id), label="Brev instance list",
+        token=api_key, retry=True,
+    )
+    # Go encodes an empty list as null.
+    if workspaces is None:
+        return []
+    if not isinstance(workspaces, list) or not all(isinstance(w, dict) for w in workspaces):
+        raise MonitorError("Brev instance list: unexpected response schema.")
+    return workspaces
+
+
+def create_workspace(api_key, org_id, candidate, name):
+    # Field set and defaults follow brev-cli NewCreateWorkspacesOptions + gpucreate.
+    body = {
+        "name": name, "cloudCredId": candidate["cloud_cred_id"],
+        "workspaceClassId": WORKSPACE_CLASS_ID,
+        "workspaceTemplateId": WORKSPACE_TEMPLATE_ID,
+        "description": "", "isStoppable": False, "primaryApplicationId": "",
+        "applications": None, "startupScript": "", "gitRepo": "", "initBranch": "",
+        "startupScriptPath": "", "dotBrevPath": "", "ideConfig": None,
+        "repos": None, "execs": None, "reposV1": {}, "execsV1": {},
+        "instanceType": candidate["instance_type"], "diskStorage": WORKSPACE_DISK,
+        "baseImage": "", "vmOnlyMode": False,
+        "vmBuild": {"forceJupyterInstall": True}, "portMappings": {},
+        "files": None, "labels": None, "workspaceVersion": "v1",
+        "launchJupyterOnStart": False,
+    }
+    # Never retry: a timed-out creation may still have been accepted.
+    workspace = request_json(
+        "POST", workspaces_url(org_id), label="Brev instance creation",
+        token=api_key, body=body,
+    )
+    if not isinstance(workspace, dict) or not isinstance(workspace.get("id"), str):
+        raise MonitorError("Brev instance creation: unexpected response; check the console.")
+    return workspace
+
+
+def autostart(api_key, label, items, state):
+    """Start at most one instance per arm label. Return (state changes, alerts, summary)."""
+    if not label:
+        return {}, [], "Auto-start: disabled."
+    if label == state["autostart"]:
+        return {}, [], (f"Auto-start: already used for label `{label}`. Change "
+                        "`BREV_AUTOSTART` to allow another start.")
+    candidates = autostart_candidates(items)
+    if not candidates:
+        return {}, [], "Auto-start: armed; no available single B200/B300 listing."
+    name = AUTOSTART_PREFIX + label
+    candidate = candidates[0]
+    try:
+        if not isinstance(candidate["cloud_cred_id"], str) or not candidate["cloud_cred_id"]:
+            raise MonitorError("Brev GPU catalog: available listing has no cloudCredId; "
+                               "update the monitor.")
+        org_id = resolve_org(api_key)
+        existing = [w for w in list_workspaces(api_key, org_id) if w.get("name") == name]
+        if not existing:
+            workspace = create_workspace(api_key, org_id, candidate, name)
+    except MonitorError as exc:
+        error = str(exc)
+        alerts = [] if error == state["autostart_error"] else [
+            "## Auto-start failed\n\n" + safe_text(error)
+            + "\n\nIf the request timed out, the instance may still have been created. "
+            "The next run checks for it by name before trying again."
+        ]
+        return {"autostart_error": error}, alerts, "Auto-start: FAILED. " + safe_text(error)
+    done = {"autostart": label, "autostart_error": ""}
+    if existing:
+        status = safe_text(existing[0].get("status") or "unknown")
+        return done, [
+            f"## Auto-start skipped\n\nInstance `{name}` already exists (status: {status}), "
+            "so no second instance was created. Auto-start is now used for this label."
+        ], f"Auto-start: `{name}` already exists; nothing created."
+    details = (
+        "| Name | ID | Instance | GPU | Provider | Base price |\n"
+        "| --- | --- | --- | --- | --- | --- |\n| " + " | ".join(safe_text(v) for v in (
+            name, workspace["id"], candidate["instance_type"], candidate["gpu"],
+            candidate["provider"], candidate["price"],
+        )) + " |"
+    )
+    return done, [
+        "## Instance started\n\n" + details + "\n\n**Billing continues until you stop "
+        "or delete this instance in the Brev console.** Auto-start is now used; set "
+        "`BREV_AUTOSTART` to a new value to allow another start."
+    ], "Auto-start: STARTED.\n\n" + details
+
+
 def safe_text(value):
     return html.escape(str(value)).replace("|", "\\|").replace("@", "&#64;").replace(
         "\n", " "
@@ -234,8 +373,8 @@ def match_table(matches):
 
 def initial_state():
     return {
-        "version": 1, "matches": {}, "error": "", "expiry_notice": "",
-        "last_success": "",
+        "version": 2, "matches": {}, "error": "", "expiry_notice": "",
+        "last_success": "", "autostart": "", "autostart_error": "",
     }
 
 
@@ -277,10 +416,14 @@ def decode_state(body):
         state = json.loads(raw)
     except json.JSONDecodeError:
         raise MonitorError("Monitor issue state is not valid JSON.") from None
-    if (not isinstance(state, dict) or state.get("version") != 1
+    if isinstance(state, dict) and state.get("version") == 1:
+        # Version 2 adds auto-start bookkeeping; version 1 never started anything.
+        state.update(version=2, autostart="", autostart_error="")
+    if (not isinstance(state, dict) or state.get("version") != 2
             or not isinstance(state.get("matches"), dict)
             or not all(isinstance(state.get(k), str)
-                       for k in ("error", "expiry_notice", "last_success"))
+                       for k in ("error", "expiry_notice", "last_success",
+                                 "autostart", "autostart_error"))
             or not all(re.fullmatch(r"[a-f0-9]{32}", k)
                        and v in ("available", "unavailable", "unknown")
                        for k, v in state["matches"].items())):
@@ -392,7 +535,8 @@ def issue_body(state, summary, run_url):
         f"[Brev console]({CONSOLE_URL}) | [Workflow run]({run_url})\n\n"
         "A catalog listing or API availability flag does not guarantee that an "
         "instance can be rented. Prices are base prices and may vary by region; "
-        "storage and other charges may be additional. No instances are created.\n\n"
+        "storage and other charges may be additional. An instance is created only "
+        "when auto-start is armed with `BREV_AUTOSTART`.\n\n"
         "Do not delete this issue, change its title, or edit its hidden state. "
         "To stop monitoring, disable the workflow, rather than closing the issue.\n\n"
         + STATE_START + json.dumps(state, sort_keys=True) + STATE_END
@@ -402,13 +546,15 @@ def issue_body(state, summary, run_url):
     return body
 
 
-def run_monitor(github, *, api_key, expires_on, notify_user, run_url, now):
+def run_monitor(github, *, api_key, expires_on, notify_user, run_url, now,
+                autostart_value=""):
     if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", notify_user):
         raise MonitorError("NOTIFY_USER must be a GitHub username without @.")
     issue = github.find_issue()
     previous = decode_state(issue["body"]) if issue else initial_state()
     matches = None
     catalog_count = None
+    items = []
     error = ""
     try:
         items = fetch_catalog(api_key)
@@ -419,6 +565,19 @@ def run_monitor(github, *, api_key, expires_on, notify_user, run_url, now):
     state, alerts = evaluate(
         previous, now=now, expires_on=expires_on, matches=matches, error=error,
     )
+    start_summary = "Auto-start: skipped because the catalog check failed."
+    if not error:
+        try:
+            label = autostart_label(autostart_value)
+        except MonitorError as exc:
+            changes = {"autostart_error": str(exc)}
+            start_alerts = ([] if str(exc) == state["autostart_error"]
+                            else ["## Auto-start configuration\n\n" + safe_text(exc)])
+            start_summary = safe_text(exc)
+        else:
+            changes, start_alerts, start_summary = autostart(api_key, label, items, state)
+        state.update(changes)
+        alerts.extend(start_alerts)
     if error:
         summary = (
             "**Result: CHECK FAILED**\n\n" + safe_text(error)
@@ -439,6 +598,7 @@ def run_monitor(github, *, api_key, expires_on, notify_user, run_url, now):
             "No monitored GPU configurations were found in your Brev organization's "
             "catalog. This is not a platform-wide result."
         )
+    summary += "\n\n" + start_summary
     final_body = issue_body(state, summary, run_url)
     if not issue:
         # Save an unacknowledged state until the alert comment has been delivered.
@@ -490,6 +650,7 @@ def main():
                 run_url=f"https://github.com/{repository}/actions/runs/"
                         + os.environ.get("GITHUB_RUN_ID", ""),
                 now=datetime.now(timezone.utc),
+                autostart_value=os.environ.get("BREV_AUTOSTART", ""),
             )
     except MonitorError as exc:
         print(f"Monitor failed: {exc}", file=sys.stderr)
