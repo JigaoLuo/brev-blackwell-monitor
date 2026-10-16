@@ -122,9 +122,11 @@ Public catalog access is explicitly limited to `--dry-run --public-catalog`.
 - State lives in the hidden JSON marker in the bot-created
   `Brev Blackwell monitor` Issue. Search includes closed issues and paginates;
   closing the issue does not disable monitoring.
-- State schema version 2 contains `matches`, `error`, `expiry_notice`,
-  `last_success`, `autostart` (the consumed arm label), and `autostart_error`.
-  Version 1 is migrated in `decode_state` with empty auto-start fields. A damaged
+- State schema version 3 contains `matches`, `error`, `expiry_notice`,
+  `last_success`, `autostart` (the consumed arm label), `autostart_error`,
+  `autostart_failures` (label to count of instances that never ran), and
+  `autostart_ran` (whether the current instance reached a running status).
+  Versions 1 and 2 are migrated in `decode_state`. A damaged
   or unsupported state is an error, not an empty baseline. Schema changes
   require migration or an explicit recovery procedure.
 - Alert on a newly observed identity, reappearance after a successful absent
@@ -151,10 +153,17 @@ Public catalog access is explicitly limited to `--dry-run --public-catalog`.
 - Candidates are monitored matches (same B200/B300 single-GPU rules) whose
   listing has `isAvailable: true`, sorted cheapest base price first. There is
   intentionally no price cap; the owner chose this.
-- One instance per arm label. The instance name is `blackwell-auto-<label>`.
+- At most one instance per arm label that actually runs. The first instance is
+  `blackwell-auto-<label>`; after `n` failures it is `blackwell-auto-<label>-<n+1>`.
   Before creating, list the organization's instances; an existing instance with
-  that name consumes the label without creating another. This name check is
-  what makes reruns, crashes after creation, and failed notifications safe.
+  the current name consumes the label without creating another. This name check
+  is what makes reruns, crashes after creation, and failed notifications safe.
+- While a label is used, every run looks up its current instance. `RUNNING`,
+  `STOPPING`, or `STOPPED` sets `autostart_ran`; from then on the label stays
+  used forever, even if the instance is deleted or later fails. If the instance
+  never ran and is `FAILURE`, `DELETING`, or gone, increment the label's failure
+  count, clear `autostart`, alert, and select a replacement in the same run.
+  Any other status (such as `DEPLOYING`) waits. A lookup error never creates.
 - Never retry the creation `POST`. A failure leaves the label armed and alerts
   once per distinct error; the next run rechecks by name before trying again.
 - After a start, record the label in state. The owner re-arms by setting

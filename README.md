@@ -75,8 +75,15 @@ instance named `blackwell-auto-<label>` using the cheapest such listing. There i
 Jupyter and a 120 GiB disk. You are mentioned in an **Instance started** comment
 with the instance ID, type, and base price.
 
-- **One instance per label.** After a start, that label is used up; to allow
-  another start, change `BREV_AUTOSTART` to a new value such as `2`.
+- **One running instance per label.** Once the started instance reaches
+  `RUNNING` (or later `STOPPED`), that label is used up for good, even after you
+  delete the instance. To allow another start, change `BREV_AUTOSTART` to a new
+  value such as `2`.
+- **Failed deployments retry.** If the started instance ends with `FAILURE`, or
+  disappears, without ever running, you get a **Started instance failed** alert
+  and auto-start re-arms. The next available listing starts
+  `blackwell-auto-<label>-2`, then `-3`, and so on. Failed instances are left in
+  Brev for you to inspect or delete.
 - **Duplicate protection.** Before creating, the monitor checks whether an
   instance named `blackwell-auto-<label>` already exists. Reruns, crashes, or
   failed notifications therefore cannot start a second instance for the same label.
