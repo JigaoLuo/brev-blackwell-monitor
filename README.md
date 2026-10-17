@@ -127,7 +127,10 @@ failed cron invocations.
 The push trigger is configured for the `main` branch.
 
 There is one Linux job, with no third-party Python dependencies, browser
-installation, or Brev CLI installation. Each job has a three-minute timeout.
+installation, or Brev CLI installation. Each job has a five-minute timeout.
+Brev's catalog occasionally stalls for tens of seconds shortly after the hour,
+so read requests get three attempts (20-second timeout, then 5- and 15-second
+pauses) before a check is reported as failed.
 At one billed minute per run, usage is approximately 1,440 minutes over 30 days
 or 1,488 minutes over 31 days for the 30-minute cadence. Two billed minutes per
 run doubles those estimates. GitHub's backup schedule adds its own runs on top

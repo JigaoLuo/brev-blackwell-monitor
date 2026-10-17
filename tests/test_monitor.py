@@ -578,10 +578,22 @@ class HttpTests(unittest.TestCase):
         response.__enter__ = Mock(return_value=response)
         response.__exit__ = Mock(return_value=False)
         response.read.return_value = b'{"items":[]}'
-        build.return_value.open.side_effect = [URLError("private detail"), response]
+        build.return_value.open.side_effect = [
+            URLError("private detail"), TimeoutError(), response,
+        ]
         result = m.request_json("GET", "https://example.com", label="Brev", retry=True)
         self.assertEqual(result, {"items": []})
-        self.assertEqual(build.return_value.open.call_count, 2)
+        self.assertEqual(build.return_value.open.call_count, 3)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [5, 15])
+
+    @patch.object(m.time, "sleep")
+    @patch.object(m, "build_opener")
+    def test_read_gives_up_after_three_attempts(self, build, sleep):
+        build.return_value.open.side_effect = TimeoutError()
+        with self.assertRaisesRegex(m.MonitorError, "connection failed or timed out"):
+            m.request_json("POST", "https://example.com", label="Brev GPU catalog",
+                           body={}, retry=True)
+        self.assertEqual(build.return_value.open.call_count, 3)
 
     @patch.object(m, "build_opener")
     def test_auth_error_does_not_leak_response_body_or_key(self, build):

@@ -36,6 +36,12 @@ WORKSPACE_DISK = "120Gi"
 RAN_STATUSES = ("RUNNING", "STOPPING", "STOPPED")
 
 
+# Brev's catalog RPC sometimes stalls for tens of seconds shortly after the hour.
+# Reads get three attempts spanning about 80 seconds; writes are never retried.
+REQUEST_TIMEOUT = 20
+READ_RETRY_DELAYS = (5, 15)
+
+
 class MonitorError(Exception):
     """An actionable error that is safe to include in logs and notifications."""
 
@@ -63,25 +69,27 @@ def request_json(method, url, *, label, token="", body=None, retry=False,
         headers["Content-Type"] = "application/json"
         data = json.dumps(body).encode("utf-8")
     opener = build_opener(NoRedirects())
-    for attempt in range(2 if retry else 1):
+    delays = READ_RETRY_DELAYS if retry else ()
+    for attempt in range(len(delays) + 1):
+        retry_left = attempt < len(delays)
         try:
             request = Request(url, data=data, headers=headers, method=method)
-            with opener.open(request, timeout=15) as response:
+            with opener.open(request, timeout=REQUEST_TIMEOUT) as response:
                 payload = response.read()
             return json.loads(payload)
         except HTTPError as exc:
             status = exc.code
             exc.close()
-            if retry and attempt == 0 and status in (429, 500, 502, 503, 504):
-                time.sleep(2)
+            if retry_left and status in (429, 500, 502, 503, 504):
+                time.sleep(delays[attempt])
                 continue
             hint = ""
             if status in (401, 403):
                 hint = " Check the credential, its expiration, and permissions."
             raise MonitorError(f"{label}: HTTP {status}.{hint}") from None
         except (URLError, TimeoutError):
-            if retry and attempt == 0:
-                time.sleep(2)
+            if retry_left:
+                time.sleep(delays[attempt])
                 continue
             raise MonitorError(f"{label}: connection failed or timed out.") from None
         except (json.JSONDecodeError, UnicodeDecodeError):

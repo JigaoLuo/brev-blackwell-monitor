@@ -176,7 +176,10 @@ Use `MonitorError` for sanitized, actionable errors. Never print authentication
 headers, credential values, or raw server error bodies. Reject redirects so an
 Authorization header cannot be forwarded elsewhere.
 
-Only retry reads/read-only RPCs, with bounded timeouts and backoff. Do not blindly
+Only retry reads/read-only RPCs, with bounded timeouts and backoff
+(`REQUEST_TIMEOUT` 20 s, `READ_RETRY_DELAYS` 5 s and 15 s, so three attempts).
+Brev's catalog has been observed to stall shortly after the hour; keep the job
+`timeout-minutes` (5) above the worst-case read time. Do not blindly
 retry Issue-creation, notification, or instance-creation POSTs: the server may
 have accepted a timed out request. Do not treat malformed data or missing authentication as zero GPUs.
 
