@@ -23,7 +23,7 @@ Report the API's base hourly price; do not describe it as a complete quote.
 
 - `scripts/monitor.py`: HTTP clients, catalog parsing, model detection, state
   transitions, auto-start, GitHub Issue delivery, and CLI entry point.
-- `.github/workflows/monitor.yml`: one Linux job, every 30 minutes, plus manual
+- `.github/workflows/monitor.yml`: one Linux job, a backup schedule, plus manual
   dispatch and relevant pushes to `main`. UTC cron is `17,47 * * * *`.
 - `cloudflare/`: a Cloudflare Worker whose Cron Trigger (`7,37 * * * *` UTC)
   calls `workflow_dispatch`, because GitHub's `schedule` often skips runs. It
@@ -36,7 +36,7 @@ Report the API's base hourly price; do not describe it as a complete quote.
 
 Python 3.10+ and its standard library are the only runtime requirements.
 Do not add browsers, Brev CLI installation, or third-party dependencies without
-a concrete need. Keep scheduled jobs short because this private repository
+a concrete need. Keep scheduled jobs short because this repository
 consumes the owner's GitHub Actions minute allowance.
 
 ## Commands
@@ -121,7 +121,10 @@ Public catalog access is explicitly limited to `--dry-run --public-catalog`.
 - Missing `isAvailable` is reported as `unknown`, not a promise of stock.
 - State lives in the hidden JSON marker in the bot-created
   `Brev Blackwell monitor` Issue. Search includes closed issues and paginates;
-  closing the issue does not disable monitoring.
+  closing the issue does not disable monitoring. The oldest matching issue wins.
+  The `creator`-filtered listing once omitted the state issue and a duplicate
+  with empty state was created, so `find_issue` confirms absence with an
+  unfiltered listing (title plus bot author) before creating a new issue.
 - State schema version 3 contains `matches`, `error`, `expiry_notice`,
   `last_success`, `autostart` (the consumed arm label), `autostart_error`,
   `autostart_failures` (label to count of instances that never ran), and
@@ -158,6 +161,10 @@ Public catalog access is explicitly limited to `--dry-run --public-catalog`.
   Before creating, list the organization's instances; an existing instance with
   the current name consumes the label without creating another. This name check
   is what makes reruns, crashes after creation, and failed notifications safe.
+  Before creating, any live (not `FAILURE`/`DELETING`) instance named
+  `blackwell-auto-<label>` or `blackwell-auto-<label>-<n>` also blocks creation
+  and becomes the tracked instance, so lost or reset state cannot start a
+  second GPU.
 - While a label is used, every run looks up its current instance. `RUNNING`,
   `STOPPING`, or `STOPPED` sets `autostart_ran`; from then on the label stays
   used forever, even if the instance is deleted or later fails. If the instance

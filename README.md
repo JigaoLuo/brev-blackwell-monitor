@@ -1,7 +1,8 @@
 # Brev Blackwell Monitor
 
-Checks the Brev GPU catalog every 30 minutes and sends alerts through a GitHub
-Issue in this private repository. [Auto-start](#auto-start) is **on by default**:
+Checks the Brev GPU catalog on a schedule (a Cloudflare Cron Trigger, with
+GitHub's own schedule as a backup) and sends alerts through a GitHub
+Issue in this repository. [Auto-start](#auto-start) is **on by default**:
 it starts **one** B200/B300 single-GPU instance when one becomes available, which
 **incurs GPU rental charges** until you stop it. Set `BREV_AUTOSTART` to `0` to
 only receive notifications.
@@ -116,6 +117,9 @@ To set it up:
 3. Under the Worker's **Settings > Variables and Secrets**, add a **Secret**
    named `GITHUB_TOKEN` containing the token.
 4. Under **Settings > Trigger events**, add a **Cron Trigger** `7,37 * * * *`.
+
+Any cadence works, down to every minute (`* * * * *`); the Cron Trigger in the
+Cloudflare dashboard is authoritative, not `wrangler.toml`.
 
 Alternatively, deploy with `npx wrangler deploy` from `cloudflare/` and set the
 secret with `npx wrangler secret put GITHUB_TOKEN`. The Worker has no HTTP

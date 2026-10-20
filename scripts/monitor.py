@@ -21,6 +21,7 @@ BREV_ORGS_URL = (
 BREV_INSTANCE_URL = "https://api.brev.dev/devplaneapi.v1.InstanceService/"
 CONSOLE_URL = "https://brev.nvidia.com/environment/new"
 ISSUE_TITLE = "Brev Blackwell monitor"
+BOT_LOGIN = "github-actions[bot]"
 STATE_START = "<!-- brev-blackwell-monitor-state\n"
 STATE_END = "\n-->"
 GPU_PATTERN = re.compile(r"\b(?:B200|B300)\b", re.IGNORECASE)
@@ -312,10 +313,23 @@ def instance_name(label, failures):
     return AUTOSTART_PREFIX + label + (f"-{failures + 1}" if failures else "")
 
 
-def find_instance(api_key, name):
-    """Return (organization ID, the instance with this name or None)."""
+def find_instance(api_key, name, label=""):
+    """Return (organization ID, the instance with this name or None).
+
+    With `label`, any live instance from that label's earlier attempts also
+    counts, so a lost or reset state cannot start a second GPU.
+    """
     org_id = resolve_org(api_key)
-    found = [w for w in list_workspaces(api_key, org_id) if w.get("name") == name]
+    workspaces = list_workspaces(api_key, org_id)
+    found = []
+    if label:
+        base = AUTOSTART_PREFIX + label
+        found = [
+            w for w in workspaces
+            if re.fullmatch(re.escape(base) + r"(?:-\d+)?", str(w.get("name", "")))
+            and w.get("status") not in ("FAILURE", "DELETING")
+        ]
+    found = found or [w for w in workspaces if w.get("name") == name]
     return org_id, found[0] if found else None
 
 
@@ -359,7 +373,7 @@ def autostart(api_key, label, items, state):
         if not isinstance(candidate["cloud_cred_id"], str) or not candidate["cloud_cred_id"]:
             raise MonitorError("Brev GPU catalog: available listing has no cloudCredId; "
                                "update the monitor.")
-        org_id, existing = find_instance(api_key, name)
+        org_id, existing = find_instance(api_key, name, label)
         if existing is None:
             workspace = create_workspace(api_key, org_id, candidate, name)
     except MonitorError as exc:
@@ -375,6 +389,13 @@ def autostart(api_key, label, items, state):
     changes.update(autostart=label, autostart_error="", autostart_ran=False)
     if existing is not None:
         status = safe_text(existing.get("status") or "unknown")
+        if existing.get("name") != name:
+            # Track the live instance from an earlier attempt from now on.
+            name = existing["name"]
+            suffix = name[len(AUTOSTART_PREFIX + label):]
+            failures = int(suffix[1:]) - 1 if suffix else 0
+            tracked = {k: v for k, v in state["autostart_failures"].items() if k != label}
+            changes["autostart_failures"] = {**tracked, **({label: failures} if failures else {})}
         return changes, alerts + [
             f"## Auto-start skipped\n\nInstance `{name}` already exists (status: {status}), "
             "so no second instance was created. Auto-start is now used for this label."
@@ -559,16 +580,27 @@ class GitHub:
         )
 
     def find_issue(self):
+        # A filtered listing once came back without the state issue, which
+        # created a duplicate with empty state. Confirm absence with an
+        # unfiltered listing before reporting that no state issue exists.
+        for creator in ("&creator=github-actions%5Bbot%5D", ""):
+            issue = self.scan_issues(creator)
+            if issue:
+                return issue
+        return None
+
+    def scan_issues(self, creator):
         page = 1
         while True:
             issues = self.call(
-                "GET", f"/issues?state=all&creator=github-actions%5Bbot%5D"
+                "GET", f"/issues?state=all{creator}"
                 f"&sort=created&direction=asc&per_page=100&page={page}",
             )
             if not isinstance(issues, list):
                 raise MonitorError("GitHub returned an invalid issue list.")
             for issue in issues:
-                if issue.get("title") == ISSUE_TITLE and "pull_request" not in issue:
+                if (issue.get("title") == ISSUE_TITLE and "pull_request" not in issue
+                        and (issue.get("user") or {}).get("login", BOT_LOGIN) == BOT_LOGIN):
                     return issue
             if len(issues) < 100:
                 return None
@@ -587,7 +619,7 @@ class GitHub:
 def issue_body(state, summary, run_url):
     body = (
         "# Brev Blackwell monitor\n\n"
-        "Checks every 30 minutes. Subscribe to this issue for alerts.\n\n"
+        "Checks run on a schedule (see the README). Subscribe to this issue for alerts.\n\n"
         f"{summary}\n\n"
         f"Last successful check (UTC): {state['last_success'] or 'not yet'}\n\n"
         f"[Brev console]({CONSOLE_URL}) | [Workflow run]({run_url})\n\n"
@@ -661,7 +693,7 @@ def run_monitor(github, *, api_key, expires_on, notify_user, run_url, now,
     if not issue:
         # Save an unacknowledged state until the alert comment has been delivered.
         issue = github.create_issue(issue_body(previous, "Monitor is starting.", run_url))
-        alerts.insert(0, "## Monitor initialized\n\nChecks run every 30 minutes. "
+        alerts.insert(0, "## Monitor initialized\n\nChecks run on a schedule (see the README). "
                       "This notification also confirms the GitHub delivery channel.")
     for comment in notification_comments(alerts, notify_user, run_url):
         github.comment(issue["number"], comment)

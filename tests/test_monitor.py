@@ -344,6 +344,19 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(github.find_issue()["number"], 2)
         self.assertIn("page=2", github.call.call_args.args[1])
 
+    def test_missing_filtered_result_is_confirmed_with_unfiltered_listing(self):
+        github = m.GitHub("owner/repo", "test")
+        bot = {"login": m.BOT_LOGIN}
+        github.call = Mock(side_effect=[
+            [],
+            [{"title": m.ISSUE_TITLE, "number": 3, "user": {"login": "stranger"}},
+             {"title": m.ISSUE_TITLE, "number": 1, "user": bot}],
+        ])
+        self.assertEqual(github.find_issue()["number"], 1)
+        self.assertNotIn("creator=", github.call.call_args.args[1])
+        github.call = Mock(side_effect=[[], []])
+        self.assertIsNone(github.find_issue())
+
     def test_table_does_not_create_untrusted_mentions(self):
         matches = m.find_blackwell([instance("B200 @someone | <tag>\ntext")])
         table = m.match_table(matches)
@@ -556,6 +569,38 @@ class AutostartTests(unittest.TestCase):
             m.run_monitor(self.github, **self.kwargs)
         self.assertEqual(self.creates(request), [])
         self.assertIn("cloudCredId", self.github.comment.call_args.args[1])
+
+    @patch.object(m, "fetch_catalog", return_value=[instance(cloudCredId="c")])
+    def test_lost_state_never_starts_a_second_gpu(self, _fetch):
+        # Fresh state, but an earlier attempt's instance is still alive.
+        live = [{"name": "blackwell-auto-1", "status": "FAILURE"},
+                {"name": "blackwell-auto-1-2", "status": "RUNNING"},
+                {"name": "blackwell-auto-10", "status": "RUNNING"}]
+        with self.brev(workspaces=live) as request:
+            m.run_monitor(self.github, **self.kwargs)
+        self.assertEqual(self.creates(request), [])
+        issue = self.github.update_issue.call_args.args[1]
+        state = m.decode_state(issue)
+        self.assertEqual(state["autostart"], "1")
+        self.assertEqual(state["autostart_failures"], {"1": 1})
+        # The next run follows blackwell-auto-1-2 instead of re-arming.
+        self.github.find_issue.return_value = {"number": 1, "body": issue}
+        self.github.comment.reset_mock()
+        with self.brev(workspaces=live) as request:
+            m.run_monitor(self.github, **self.kwargs)
+        self.assertEqual(self.creates(request), [])
+        self.github.comment.assert_not_called()
+        self.assertTrue(m.decode_state(self.github.update_issue.call_args.args[1])["autostart_ran"])
+
+    @patch.object(m, "fetch_catalog", return_value=[instance(cloudCredId="cred1")])
+    def test_failed_instances_from_other_attempts_do_not_block(self, _fetch):
+        dead = [{"name": "blackwell-auto-1-2", "status": "FAILURE"},
+                {"name": "blackwell-auto-1-3", "status": "DELETING"},
+                {"name": "blackwell-auto-10", "status": "RUNNING"}]
+        with self.brev(workspaces=dead) as request:
+            m.run_monitor(self.github, **self.kwargs)
+        create, = self.creates(request)
+        self.assertEqual(create.kwargs["body"]["name"], "blackwell-auto-1")
 
     @patch.object(m, "fetch_catalog", return_value=[instance(cloudCredId="c")])
     def test_failed_notification_after_start_is_safe_to_rerun(self, _fetch):
