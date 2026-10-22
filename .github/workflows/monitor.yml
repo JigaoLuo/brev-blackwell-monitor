@@ -36,6 +36,8 @@ jobs:
           BREV_API_KEY: ${{ secrets.BREV_API_KEY }}
           BREV_API_KEY_EXPIRES_ON: ${{ vars.BREV_API_KEY_EXPIRES_ON }}
           NOTIFY_USER: ${{ vars.NOTIFY_USER || github.repository_owner }}
+          # Number of the state issue; read directly because listings can lag.
+          STATE_ISSUE: ${{ vars.STATE_ISSUE || '1' }}
           # Auto-start is on by default; set the variable to 0 to disable it.
           BREV_AUTOSTART: ${{ vars.BREV_AUTOSTART || '1' }}
           GITHUB_TOKEN: ${{ github.token }}

@@ -58,6 +58,12 @@ Do not delete the state Issue or edit its title or hidden JSON. Closing the Issu
 does not stop monitoring; the next run reopens it. To stop, use
 **Actions > Blackwell monitor > ... > Disable workflow**.
 
+The monitor reads the state Issue directly by number: Issue `#1` by default, or
+the number in the optional repository variable `STATE_ISSUE`. GitHub's issue
+listings have occasionally omitted it, which used to create duplicate
+**Brev Blackwell monitor** Issues with empty state. Duplicates can be closed or
+deleted; only the state Issue is used.
+
 State is acknowledged only after notification comments are delivered. If GitHub
 fails after delivery but before state persistence, the next run may repeat an
 alert rather than risk losing it.

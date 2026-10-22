@@ -66,6 +66,7 @@ paste a key into chat, command history, source files, or test fixtures.
 | `BREV_API_KEY_EXPIRES_ON` | Actions repository variable | `YYYY-MM-DD` expiry date |
 | `NOTIFY_USER` | Optional Actions repository variable | Username without `@`; defaults to owner |
 | `BREV_AUTOSTART` | Optional Actions repository variable | Arm label; the workflow defaults it to `1`. `0`/`false`/`off`/`no` disables. The script treats an empty value as disabled |
+| `STATE_ISSUE` | Optional Actions repository variable | Number of the state issue; defaults to `1` |
 | `GITHUB_TOKEN` | Automatically supplied by Actions | Issue reads/writes in this repository |
 
 `ORG_ID` is not read. `fetch_catalog` resolves the key's single organization using
@@ -121,10 +122,12 @@ Public catalog access is explicitly limited to `--dry-run --public-catalog`.
 - Missing `isAvailable` is reported as `unknown`, not a promise of stock.
 - State lives in the hidden JSON marker in the bot-created
   `Brev Blackwell monitor` Issue. Search includes closed issues and paginates;
-  closing the issue does not disable monitoring. The oldest matching issue wins.
-  The `creator`-filtered listing once omitted the state issue and a duplicate
-  with empty state was created, so `find_issue` confirms absence with an
-  unfiltered listing (title plus bot author) before creating a new issue.
+  closing the issue does not disable monitoring. Issue listings have repeatedly
+  omitted the state issue (2026-10-20, and 15 duplicates on 2026-10-22), each
+  time creating a duplicate with empty state. `find_issue` therefore first reads
+  issue `STATE_ISSUE` (default `1`) directly and uses it when its title and bot
+  author match; only then does it fall back to the filtered and unfiltered
+  listings, where the oldest match wins. Never rely on listings alone.
 - State schema version 3 contains `matches`, `error`, `expiry_notice`,
   `last_success`, `autostart` (the consumed arm label), `autostart_error`,
   `autostart_failures` (label to count of instances that never ran), and

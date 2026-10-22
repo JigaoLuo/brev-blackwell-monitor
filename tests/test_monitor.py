@@ -336,6 +336,7 @@ class DeliveryTests(unittest.TestCase):
     def test_issue_pagination_ignores_pull_requests(self):
         github = m.GitHub("owner/repo", "test")
         github.call = Mock(side_effect=[
+            None,
             [{"title": "unrelated"}] * 99 + [
                 {"title": m.ISSUE_TITLE, "pull_request": {}}
             ],
@@ -344,17 +345,41 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(github.find_issue()["number"], 2)
         self.assertIn("page=2", github.call.call_args.args[1])
 
+    def test_state_issue_is_read_directly_without_listing(self):
+        github = m.GitHub("owner/repo", "test", state_issue=1)
+        state = {"title": m.ISSUE_TITLE, "number": 1, "user": {"login": m.BOT_LOGIN}}
+        github.call = Mock(return_value=state)
+        self.assertEqual(github.find_issue()["number"], 1)
+        github.call.assert_called_once_with("GET", "/issues/1", missing_ok=True)
+        # Someone else's issue #1 falls back to the listings.
+        other = dict(state, user={"login": "stranger"})
+        github.call = Mock(side_effect=[other, [], []])
+        self.assertIsNone(github.find_issue())
+        self.assertEqual(github.call.call_count, 3)
+
+    @patch.object(m, "build_opener")
+    def test_missing_issue_is_none_but_other_errors_raise(self, build):
+        def http_error(status):
+            return HTTPError("https://example.com", status, "x", {}, io.BytesIO(b""))
+        build.return_value.open.side_effect = http_error(404)
+        self.assertIsNone(m.request_json("GET", "https://example.com", label="GitHub",
+                                         missing_ok=True))
+        build.return_value.open.side_effect = http_error(403)
+        with self.assertRaises(m.MonitorError):
+            m.request_json("GET", "https://example.com", label="GitHub", missing_ok=True)
+
     def test_missing_filtered_result_is_confirmed_with_unfiltered_listing(self):
         github = m.GitHub("owner/repo", "test")
         bot = {"login": m.BOT_LOGIN}
         github.call = Mock(side_effect=[
+            None,
             [],
             [{"title": m.ISSUE_TITLE, "number": 3, "user": {"login": "stranger"}},
              {"title": m.ISSUE_TITLE, "number": 1, "user": bot}],
         ])
         self.assertEqual(github.find_issue()["number"], 1)
         self.assertNotIn("creator=", github.call.call_args.args[1])
-        github.call = Mock(side_effect=[[], []])
+        github.call = Mock(side_effect=[None, [], []])
         self.assertIsNone(github.find_issue())
 
     def test_table_does_not_create_untrusted_mentions(self):

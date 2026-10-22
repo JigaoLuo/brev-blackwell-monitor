@@ -54,7 +54,7 @@ class NoRedirects(HTTPRedirectHandler):
 
 
 def request_json(method, url, *, label, token="", body=None, retry=False,
-                 connect=False):
+                 connect=False, missing_ok=False):
     headers = {
         "Accept": "application/json",
         "User-Agent": "brev-blackwell-monitor",
@@ -84,6 +84,8 @@ def request_json(method, url, *, label, token="", body=None, retry=False,
             if retry_left and status in (429, 500, 502, 503, 504):
                 time.sleep(delays[attempt])
                 continue
+            if missing_ok and status == 404:
+                return None
             hint = ""
             if status in (401, 403):
                 hint = " Check the credential, its expiration, and permissions."
@@ -564,25 +566,37 @@ def evaluate(previous, *, now, expires_on, matches=None, error=""):
     return state, alerts
 
 
+def is_state_issue(issue):
+    return (isinstance(issue, dict) and issue.get("title") == ISSUE_TITLE
+            and "pull_request" not in issue
+            and (issue.get("user") or {}).get("login", BOT_LOGIN) == BOT_LOGIN)
+
+
 class GitHub:
-    def __init__(self, repository, token):
+    def __init__(self, repository, token, state_issue=1):
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
             raise MonitorError("GITHUB_REPOSITORY must be owner/repository.")
         if not token:
             raise MonitorError("GITHUB_TOKEN is missing; run this through GitHub Actions.")
         self.base = f"https://api.github.com/repos/{repository}"
         self.token = token
+        self.state_issue = state_issue
 
-    def call(self, method, path, body=None):
+    def call(self, method, path, body=None, missing_ok=False):
         return request_json(
             method, self.base + path, label="GitHub Issues",
             token=self.token, body=body, retry=method == "GET",
+            missing_ok=missing_ok,
         )
 
     def find_issue(self):
-        # A filtered listing once came back without the state issue, which
-        # created a duplicate with empty state. Confirm absence with an
-        # unfiltered listing before reporting that no state issue exists.
+        # Issue listings have repeatedly come back without the state issue,
+        # each time creating a duplicate with empty state. Reading the known
+        # issue number directly is consistent, so it is checked first; the
+        # listings are only for a repository whose state issue is elsewhere.
+        issue = self.call("GET", f"/issues/{self.state_issue}", missing_ok=True)
+        if is_state_issue(issue):
+            return issue
         for creator in ("&creator=github-actions%5Bbot%5D", ""):
             issue = self.scan_issues(creator)
             if issue:
@@ -599,8 +613,7 @@ class GitHub:
             if not isinstance(issues, list):
                 raise MonitorError("GitHub returned an invalid issue list.")
             for issue in issues:
-                if (issue.get("title") == ISSUE_TITLE and "pull_request" not in issue
-                        and (issue.get("user") or {}).get("login", BOT_LOGIN) == BOT_LOGIN):
+                if is_state_issue(issue):
                     return issue
             if len(issues) < 100:
                 return None
@@ -732,7 +745,11 @@ def main():
             print(match_table(matches))
         else:
             repository = os.environ.get("GITHUB_REPOSITORY", "")
-            github = GitHub(repository, os.environ.get("GITHUB_TOKEN", ""))
+            state_issue = os.environ.get("STATE_ISSUE", "").strip() or "1"
+            if not state_issue.isdigit() or int(state_issue) < 1:
+                raise MonitorError("STATE_ISSUE must be a positive issue number.")
+            github = GitHub(repository, os.environ.get("GITHUB_TOKEN", ""),
+                            int(state_issue))
             run_monitor(
                 github, api_key=api_key,
                 expires_on=os.environ.get("BREV_API_KEY_EXPIRES_ON", "").strip(),
