@@ -184,27 +184,25 @@ class StateTests(unittest.TestCase):
         body = m.issue_body(state, "summary", "https://github.com/example/run")
         self.assertEqual(m.decode_state(body), state)
         for body in ("", m.STATE_START + "bad" + m.STATE_END,
-                     m.STATE_START + '{"version": 4}' + m.STATE_END):
+                     m.STATE_START + '{"version": 5}' + m.STATE_END):
             with self.subTest(body=body), self.assertRaises(m.MonitorError):
                 m.decode_state(body)
 
-    def test_version_1_state_is_migrated(self):
-        old = {"version": 1, "matches": {}, "error": "", "expiry_notice": "",
-               "last_success": ""}
-        state = m.decode_state(m.STATE_START + json.dumps(old) + m.STATE_END)
-        self.assertEqual(state, m.initial_state())
-
-    def test_version_2_state_keeps_used_label(self):
-        old = {"version": 2, "matches": {}, "error": "", "expiry_notice": "",
-               "last_success": "", "autostart": "1", "autostart_error": ""}
-        state = m.decode_state(m.STATE_START + json.dumps(old) + m.STATE_END)
-        self.assertEqual(state["version"], 3)
-        self.assertEqual(state["autostart"], "1")
-        self.assertEqual(state["autostart_failures"], {})
-        for bad in ({"1": 0}, {"1": "2"}, ["1"]):
-            broken = dict(state, autostart_failures=bad)
-            with self.subTest(bad=bad), self.assertRaises(m.MonitorError):
-                m.decode_state(m.STATE_START + json.dumps(broken) + m.STATE_END)
+    def test_old_state_versions_are_migrated(self):
+        base = {"matches": {}, "error": "", "expiry_notice": "", "last_success": ""}
+        for old in (
+            dict(base, version=1),
+            dict(base, version=2, autostart="1", autostart_error=""),
+            dict(base, version=3, autostart="1", autostart_error="x",
+                 autostart_failures={"1": 1}, autostart_ran=True),
+        ):
+            with self.subTest(version=old["version"]):
+                state = m.decode_state(m.STATE_START + json.dumps(old) + m.STATE_END)
+                self.assertEqual(state["version"], 4)
+                self.assertEqual(set(state), set(m.initial_state()))
+        broken = dict(m.initial_state(), autostart_error=None)
+        with self.assertRaises(m.MonitorError):
+            m.decode_state(m.STATE_START + json.dumps(broken) + m.STATE_END)
 
     def test_expiry_threshold_missing_invalid_and_expired(self):
         for value, expected in (
@@ -326,11 +324,11 @@ class DeliveryTests(unittest.TestCase):
 
     @patch.object(m, "fetch_catalog", return_value=[instance()])
     @patch("builtins.print")
-    def test_autostart_disabled_without_label(self, _print, _fetch):
+    def test_autostart_off_without_flag(self, _print, _fetch):
         with patch.object(m, "request_json") as request:
             m.run_monitor(self.github, **self.kwargs)
         request.assert_not_called()
-        self.assertIn("Auto-start: disabled.", self.github.update_issue.call_args.args[1])
+        self.assertIn("Auto-start: off.", self.github.update_issue.call_args.args[1])
 
 
     def test_issue_pagination_ignores_pull_requests(self):
@@ -401,7 +399,7 @@ class AutostartTests(unittest.TestCase):
         self.kwargs = {
             "api_key": "bak-test", "expires_on": "2026-12-31",
             "notify_user": "example", "run_url": "https://github.com/example/run",
-            "now": NOW, "autostart_value": "1",
+            "now": NOW, "autostart_value": "on",
         }
         print_patch = patch("builtins.print")
         print_patch.start()
@@ -422,14 +420,14 @@ class AutostartTests(unittest.TestCase):
     def creates(self, request):
         return [c for c in request.call_args_list if c.args[0] == "POST"]
 
-    def test_label_parsing(self):
-        for value in ("", " ", "0", "false", "OFF", "no"):
-            self.assertEqual(m.autostart_label(value), "")
-        self.assertEqual(m.autostart_label(" 1 "), "1")
-        self.assertEqual(m.autostart_label("Run-2"), "run-2")
-        for value in ("-1", "a b", "x" * 21, "1;rm"):
+    def test_flag_parsing(self):
+        for value in ("", " ", "0", "false", "OFF", "no", "disabled"):
+            self.assertFalse(m.autostart_enabled(value))
+        for value in ("1", "true", " On ", "yes", "enabled"):
+            self.assertTrue(m.autostart_enabled(value))
+        for value in ("2", "maybe", "on;rm"):
             with self.subTest(value=value), self.assertRaises(m.MonitorError):
-                m.autostart_label(value)
+                m.autostart_enabled(value)
 
     def test_candidates_are_available_single_gpu_cheapest_first(self):
         items = [
@@ -447,128 +445,85 @@ class AutostartTests(unittest.TestCase):
         self.assertEqual(candidates[0]["cloud_cred_id"], "c2")
 
     @patch.object(m, "fetch_catalog", return_value=[instance(cloudCredId="cred1")])
-    def test_starts_one_instance_then_never_again_for_same_label(self, _fetch):
+    def test_starts_one_when_none_is_live(self, _fetch):
         with self.brev(workspaces=[]) as request:
             m.run_monitor(self.github, **self.kwargs)
         create, = self.creates(request)
         body = create.kwargs["body"]
         self.assertEqual(create.args[1], m.BREV_ORGS_URL + "/org1/workspaces")
         self.assertFalse(create.kwargs.get("retry"))
-        self.assertEqual(body["name"], "blackwell-auto-1")
+        self.assertEqual(body["name"], "blackwell-auto-" + NOW.strftime("%Y%m%d-%H%M%S"))
         self.assertEqual(body["instanceType"], "b200-1x")
         self.assertEqual(body["cloudCredId"], "cred1")
         comment = self.github.comment.call_args.args[1]
         self.assertIn("Instance started", comment)
         self.assertIn("USD 4.00/h", comment)
         self.assertIn("Billing continues", comment)
-        issue = self.github.update_issue.call_args.args[1]
-        self.assertEqual(m.decode_state(issue)["autostart"], "1")
-        self.assertFalse(m.decode_state(issue)["autostart_ran"])
-        for status in ("DEPLOYING", "RUNNING", "STOPPED", "FAILURE", None):
+        self.assertIn("`off` **before**", comment)
+
+    @patch.object(m, "fetch_catalog", return_value=[instance(cloudCredId="cred1")])
+    def test_live_instance_blocks_a_second(self, _fetch):
+        for status in ("DEPLOYING", "STARTING", "RUNNING", "STOPPING", None, "SOMETHING_NEW"):
             with self.subTest(status=status):
-                self.github.find_issue.return_value = {
-                    "number": 1, "body": self.github.update_issue.call_args.args[1],
-                }
-                # None: the owner deleted the instance after it had run.
-                workspaces = [{"name": "blackwell-auto-1", "status": status}] if status else []
-                with self.brev(workspaces=workspaces) as request:
+                live = [{"name": "blackwell-auto-old", "status": status}]
+                with self.brev(workspaces=live) as request:
                     m.run_monitor(self.github, **self.kwargs)
                 self.assertEqual(self.creates(request), [])
-        state = m.decode_state(self.github.update_issue.call_args.args[1])
-        self.assertTrue(state["autostart_ran"])
-        self.assertEqual(state["autostart_failures"], {})
-
-    def run_after_start(self, workspaces):
-        """Run once with label `1` already used by `blackwell-auto-1`."""
-        state = m.initial_state()
-        state["autostart"] = "1"
-        self.github.find_issue.return_value = {
-            "number": 1, "body": m.issue_body(state, "summary", "https://x/run"),
-        }
-        with self.brev(workspaces=workspaces) as request:
-            m.run_monitor(self.github, **self.kwargs)
-        return request, m.decode_state(self.github.update_issue.call_args.args[1])
+                self.assertIn("so no other instance is started",
+                              self.github.update_issue.call_args.args[1])
 
     @patch.object(m, "fetch_catalog", return_value=[instance(cloudCredId="cred1")])
-    def test_failed_instance_rearms_and_starts_a_replacement(self, _fetch):
-        failed = [{"name": "blackwell-auto-1", "status": "FAILURE"}]
-        request, state = self.run_after_start(failed)
-        create, = self.creates(request)
-        self.assertEqual(create.kwargs["body"]["name"], "blackwell-auto-1-2")
-        self.assertEqual(state["autostart"], "1")
-        self.assertEqual(state["autostart_failures"], {"1": 1})
-        comment = self.github.comment.call_args.args[1]
-        self.assertIn("Started instance failed", comment)
-        self.assertIn("Instance started", comment)
-        # The replacement is now the one that is checked; the old failure is ignored.
-        self.github.find_issue.return_value = {
-            "number": 1, "body": self.github.update_issue.call_args.args[1],
-        }
-        with self.brev(workspaces=failed + [{"name": "blackwell-auto-1-2",
-                                             "status": "RUNNING"}]) as request:
-            m.run_monitor(self.github, **self.kwargs)
-        self.assertEqual(self.creates(request), [])
-
-    @patch.object(m, "fetch_catalog", return_value=[instance(cloudCredId="cred1")])
-    def test_instance_deleted_before_running_rearms(self, _fetch):
-        for workspaces in ([], [{"name": "blackwell-auto-1", "status": "DELETING"}]):
+    def test_stopped_failed_or_deleted_instance_frees_the_slot(self, _fetch):
+        for workspaces in ([{"name": "blackwell-auto-old", "status": "STOPPED"}],
+                           [{"name": "blackwell-auto-old", "status": "FAILURE"}],
+                           [{"name": "blackwell-auto-old", "status": "DELETING"}],
+                           []):
             with self.subTest(workspaces=workspaces):
-                request, state = self.run_after_start(workspaces)
-                create, = self.creates(request)
-                self.assertEqual(create.kwargs["body"]["name"], "blackwell-auto-1-2")
-                self.assertFalse(state["autostart_ran"])
+                with self.brev(workspaces=workspaces) as request:
+                    m.run_monitor(self.github, **self.kwargs)
+                self.assertEqual(len(self.creates(request)), 1)
 
     @patch.object(m, "fetch_catalog", return_value=[instance(cloudCredId="cred1")])
-    def test_deploying_instance_is_waited_for(self, _fetch):
-        request, state = self.run_after_start([{"name": "blackwell-auto-1",
-                                                "status": "DEPLOYING"}])
-        self.assertEqual(self.creates(request), [])
-        self.assertEqual(state["autostart"], "1")
-        self.assertNotIn("Auto-start", self.github.comment.call_args.args[1])
-        self.assertNotIn("Started instance", self.github.comment.call_args.args[1])
-
-    @patch.object(m, "fetch_catalog", return_value=[instance(available=False, cloudCredId="c")])
-    def test_failed_instance_rearms_without_available_listing(self, _fetch):
-        request, state = self.run_after_start([{"name": "blackwell-auto-1", "status": "FAILURE"}])
-        self.assertEqual(self.creates(request), [])
-        self.assertEqual(state["autostart"], "")
-        self.assertEqual(state["autostart_failures"], {"1": 1})
-        self.assertIn("re-armed", self.github.comment.call_args.args[1])
+    def test_manual_instances_are_ignored(self, _fetch):
+        mine = [{"name": "my-own-b200", "status": "RUNNING"}]
+        with self.brev(workspaces=mine) as request:
+            m.run_monitor(self.github, **self.kwargs)
+        self.assertEqual(len(self.creates(request)), 1)
 
     @patch.object(m, "fetch_catalog", return_value=[instance(cloudCredId="cred1")])
-    def test_instance_list_failure_after_start_does_not_create(self, _fetch):
+    def test_off_never_touches_brev_instances(self, _fetch):
+        for value in ("off", "0", ""):
+            with self.subTest(value=value):
+                with self.brev(workspaces=[]) as request:
+                    m.run_monitor(self.github, **dict(self.kwargs, autostart_value=value))
+                request.assert_not_called()
+                self.assertIn("Auto-start: off.", self.github.update_issue.call_args.args[1])
+
+    @patch.object(m, "fetch_catalog", return_value=[instance(cloudCredId="cred1")])
+    def test_invalid_flag_alerts_and_never_creates(self, _fetch):
+        with self.brev(workspaces=[]) as request:
+            m.run_monitor(self.github, **dict(self.kwargs, autostart_value="2"))
+        request.assert_not_called()
+        self.assertIn("must be `on` or `off`", self.github.comment.call_args.args[1])
+
+    @patch.object(m, "fetch_catalog", return_value=[instance(cloudCredId="cred1")])
+    def test_instance_list_failure_does_not_create(self, _fetch):
         def fake(method, url, **kwargs):
             if url == m.BREV_ORGS_URL:
                 return [{"id": "org1"}]
             raise m.MonitorError("Brev instance list: HTTP 500.")
-        state = m.initial_state()
-        state["autostart"] = "1"
-        self.github.find_issue.return_value = {
-            "number": 1, "body": m.issue_body(state, "summary", "https://x/run"),
-        }
         with patch.object(m, "request_json", side_effect=fake) as request:
             m.run_monitor(self.github, **self.kwargs)
         self.assertEqual(self.creates(request), [])
-        self.assertEqual(m.decode_state(self.github.update_issue.call_args.args[1])["autostart"], "1")
+        self.assertIn("Auto-start failed", self.github.comment.call_args.args[1])
 
     @patch.object(m, "fetch_catalog", return_value=[instance(cloudCredId="cred1")])
-    def test_existing_instance_with_same_name_prevents_duplicate(self, _fetch):
-        with self.brev(workspaces=[{"name": "blackwell-auto-1", "status": "RUNNING"}]) as request:
-            m.run_monitor(self.github, **self.kwargs)
-        self.assertEqual(self.creates(request), [])
-        self.assertIn("Auto-start skipped", self.github.comment.call_args.args[1])
-        state = m.decode_state(self.github.update_issue.call_args.args[1])
-        self.assertEqual(state["autostart"], "1")
-
-    @patch.object(m, "fetch_catalog", return_value=[instance(cloudCredId="cred1")])
-    def test_failed_creation_alerts_once_and_stays_armed(self, _fetch):
+    def test_failed_creation_alerts_once_and_retries_next_run(self, _fetch):
         error = m.MonitorError("Brev instance creation: connection failed or timed out.")
         with self.brev(workspaces=None, create_error=error):
             m.run_monitor(self.github, **self.kwargs)
         self.assertIn("Auto-start failed", self.github.comment.call_args.args[1])
         issue = self.github.update_issue.call_args.args[1]
-        state = m.decode_state(issue)
-        self.assertEqual(state["autostart"], "")
         self.github.find_issue.return_value = {"number": 1, "body": issue}
         self.github.comment.reset_mock()
         with self.brev(workspaces=None, create_error=error) as request:
@@ -581,6 +536,7 @@ class AutostartTests(unittest.TestCase):
         with self.brev(workspaces=[]) as request:
             m.run_monitor(self.github, **self.kwargs)
         request.assert_not_called()
+        self.assertIn("Auto-start: on; no available", self.github.update_issue.call_args.args[1])
 
     @patch.object(m, "fetch_catalog", side_effect=m.MonitorError("Brev GPU catalog: HTTP 500."))
     def test_catalog_failure_never_starts(self, _fetch):
@@ -596,46 +552,15 @@ class AutostartTests(unittest.TestCase):
         self.assertIn("cloudCredId", self.github.comment.call_args.args[1])
 
     @patch.object(m, "fetch_catalog", return_value=[instance(cloudCredId="c")])
-    def test_lost_state_never_starts_a_second_gpu(self, _fetch):
-        # Fresh state, but an earlier attempt's instance is still alive.
-        live = [{"name": "blackwell-auto-1", "status": "FAILURE"},
-                {"name": "blackwell-auto-1-2", "status": "RUNNING"},
-                {"name": "blackwell-auto-10", "status": "RUNNING"}]
-        with self.brev(workspaces=live) as request:
-            m.run_monitor(self.github, **self.kwargs)
-        self.assertEqual(self.creates(request), [])
-        issue = self.github.update_issue.call_args.args[1]
-        state = m.decode_state(issue)
-        self.assertEqual(state["autostart"], "1")
-        self.assertEqual(state["autostart_failures"], {"1": 1})
-        # The next run follows blackwell-auto-1-2 instead of re-arming.
-        self.github.find_issue.return_value = {"number": 1, "body": issue}
-        self.github.comment.reset_mock()
-        with self.brev(workspaces=live) as request:
-            m.run_monitor(self.github, **self.kwargs)
-        self.assertEqual(self.creates(request), [])
-        self.github.comment.assert_not_called()
-        self.assertTrue(m.decode_state(self.github.update_issue.call_args.args[1])["autostart_ran"])
-
-    @patch.object(m, "fetch_catalog", return_value=[instance(cloudCredId="cred1")])
-    def test_failed_instances_from_other_attempts_do_not_block(self, _fetch):
-        dead = [{"name": "blackwell-auto-1-2", "status": "FAILURE"},
-                {"name": "blackwell-auto-1-3", "status": "DELETING"},
-                {"name": "blackwell-auto-10", "status": "RUNNING"}]
-        with self.brev(workspaces=dead) as request:
-            m.run_monitor(self.github, **self.kwargs)
-        create, = self.creates(request)
-        self.assertEqual(create.kwargs["body"]["name"], "blackwell-auto-1")
-
-    @patch.object(m, "fetch_catalog", return_value=[instance(cloudCredId="c")])
-    def test_failed_notification_after_start_is_safe_to_rerun(self, _fetch):
+    def test_rerun_after_failed_notification_sees_the_new_instance(self, _fetch):
         self.github.comment.side_effect = m.MonitorError("GitHub: HTTP 403.")
         with self.brev(workspaces=[]), self.assertRaises(m.MonitorError):
             m.run_monitor(self.github, **self.kwargs)
         self.github.update_issue.assert_not_called()
-        # The rerun finds the instance by name instead of creating a second one.
+        # Brev now lists the instance, so the rerun does not create another.
         self.github.comment.side_effect = None
-        with self.brev(workspaces=[{"name": "blackwell-auto-1"}]) as request:
+        started = [{"name": "blackwell-auto-x", "status": "DEPLOYING"}]
+        with self.brev(workspaces=started) as request:
             m.run_monitor(self.github, **self.kwargs)
         self.assertEqual(self.creates(request), [])
 

@@ -38,7 +38,7 @@ jobs:
           NOTIFY_USER: ${{ vars.NOTIFY_USER || github.repository_owner }}
           # Number of the state issue; read directly because listings can lag.
           STATE_ISSUE: ${{ vars.STATE_ISSUE || '1' }}
-          # Auto-start is on by default; set the variable to 0 to disable it.
-          BREV_AUTOSTART: ${{ vars.BREV_AUTOSTART || '1' }}
+          # Auto-start is off unless the repository variable BREV_AUTOSTART is on.
+          BREV_AUTOSTART: ${{ vars.BREV_AUTOSTART || 'off' }}
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/monitor.py

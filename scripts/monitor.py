@@ -30,11 +30,14 @@ GPU_COUNT = 1
 # Auto-start mirrors the defaults of brev-cli `brev create` for API-key auth.
 AUTOSTART_PREFIX = "blackwell-auto-"
 AUTOSTART_OFF = ("", "0", "false", "off", "no", "disabled")
+AUTOSTART_ON = ("1", "true", "on", "yes", "enabled")
 WORKSPACE_CLASS_ID = "2x8"
 WORKSPACE_TEMPLATE_ID = "4nbb4lg2s"
 WORKSPACE_DISK = "120Gi"
-# Brev workspace statuses showing an instance actually ran (brev-cli entity.go).
-RAN_STATUSES = ("RUNNING", "STOPPING", "STOPPED")
+# Brev workspace statuses (brev-cli entity.go) of an auto-started instance that
+# no longer occupies the single slot. Every other status, including unknown
+# ones, counts as live so that a new instance is never started beside it.
+GONE_STATUSES = ("STOPPED", "FAILURE", "DELETING")
 
 
 # Brev's catalog RPC sometimes stalls for tens of seconds shortly after the hour.
@@ -234,14 +237,13 @@ def find_blackwell(items):
     return sorted(matches.values(), key=lambda m: (m.gpu, m.provider, m.instance_type))
 
 
-def autostart_label(value):
-    label = value.strip().lower()
-    if label in AUTOSTART_OFF:
-        return ""
-    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,18}[a-z0-9])?", label):
-        raise MonitorError("BREV_AUTOSTART must be 1-20 lowercase letters, digits, "
-                           "or hyphens (for example `1`); auto-start is disabled.")
-    return label
+def autostart_enabled(value):
+    flag = value.strip().lower()
+    if flag in AUTOSTART_OFF:
+        return False
+    if flag in AUTOSTART_ON:
+        return True
+    raise MonitorError("BREV_AUTOSTART must be `on` or `off`; auto-start is off.")
 
 
 def autostart_candidates(items):
@@ -310,98 +312,49 @@ def create_workspace(api_key, org_id, candidate, name):
     return workspace
 
 
-def instance_name(label, failures):
-    # The first attempt keeps the plain name so earlier instances are recognized.
-    return AUTOSTART_PREFIX + label + (f"-{failures + 1}" if failures else "")
+def live_instance(workspaces):
+    """Return an auto-started instance that still occupies the slot, or None."""
+    for workspace in workspaces:
+        if (str(workspace.get("name", "")).startswith(AUTOSTART_PREFIX)
+                and workspace.get("status") not in GONE_STATUSES):
+            return workspace
+    return None
 
 
-def find_instance(api_key, name, label=""):
-    """Return (organization ID, the instance with this name or None).
+def autostart(api_key, enabled, items, state, now):
+    """While enabled, keep one auto-started instance; start one if none is live.
 
-    With `label`, any live instance from that label's earlier attempts also
-    counts, so a lost or reset state cannot start a second GPU.
-    """
-    org_id = resolve_org(api_key)
-    workspaces = list_workspaces(api_key, org_id)
-    found = []
-    if label:
-        base = AUTOSTART_PREFIX + label
-        found = [
-            w for w in workspaces
-            if re.fullmatch(re.escape(base) + r"(?:-\d+)?", str(w.get("name", "")))
-            and w.get("status") not in ("FAILURE", "DELETING")
-        ]
-    found = found or [w for w in workspaces if w.get("name") == name]
-    return org_id, found[0] if found else None
-
-
-def autostart(api_key, label, items, state):
-    """Keep at most one non-failed auto-started instance per arm label.
-
+    The Brev instance list, not the issue state, decides whether one is live,
+    so lost state or a crash after creation cannot start a second instance.
     Return (state changes, alerts, summary).
     """
-    if not label:
-        return {}, [], "Auto-start: disabled."
-    changes, alerts = {}, []
-    failures = state["autostart_failures"].get(label, 0)
-    name = instance_name(label, failures)
+    if not enabled:
+        return {}, [], "Auto-start: off."
+    candidates = autostart_candidates(items)
+    if not candidates:
+        return {}, [], "Auto-start: on; no available single B200/B300 listing."
+    candidate = candidates[0]
     try:
-        if label == state["autostart"]:
-            _, started = find_instance(api_key, name)
-            status = (started.get("status") or "unknown") if started else "deleted"
-            if status in RAN_STATUSES:
-                # The label is used for good once its instance has run.
-                return ({} if state["autostart_ran"] else {"autostart_ran": True}), [], (
-                    f"Auto-start: done; `{name}` reached status {safe_text(status)}. "
-                    "Change `BREV_AUTOSTART` to allow another start.")
-            if state["autostart_ran"] or status not in ("FAILURE", "DELETING", "deleted"):
-                return {}, [], (f"Auto-start: used for label `{label}`; `{name}` has "
-                                f"status {safe_text(status)}.")
-            # The instance never ran, so nothing is running: start a replacement.
-            failures += 1
-            changes["autostart"] = ""
-            changes["autostart_failures"] = {**state["autostart_failures"], label: failures}
-            failed, name = name, instance_name(label, failures)
-            alerts.append(
-                f"## Started instance failed\n\nInstance `{failed}` ended without running "
-                f"(status: {safe_text(status)}), so no GPU is running from auto-start. "
-                f"Auto-start is re-armed: the next available listing starts `{name}`. "
-                "A failed instance is left in Brev for you to inspect or delete."
-            )
-        candidates = autostart_candidates(items)
-        if not candidates:
-            return changes, alerts, "Auto-start: armed; no available single B200/B300 listing."
-        candidate = candidates[0]
-        if not isinstance(candidate["cloud_cred_id"], str) or not candidate["cloud_cred_id"]:
-            raise MonitorError("Brev GPU catalog: available listing has no cloudCredId; "
-                               "update the monitor.")
-        org_id, existing = find_instance(api_key, name, label)
-        if existing is None:
+        org_id = resolve_org(api_key)
+        live = live_instance(list_workspaces(api_key, org_id))
+        if live is None:
+            if not isinstance(candidate["cloud_cred_id"], str) or not candidate["cloud_cred_id"]:
+                raise MonitorError("Brev GPU catalog: available listing has no cloudCredId; "
+                                   "update the monitor.")
+            name = AUTOSTART_PREFIX + now.strftime("%Y%m%d-%H%M%S")
             workspace = create_workspace(api_key, org_id, candidate, name)
     except MonitorError as exc:
         error = str(exc)
-        if error != state["autostart_error"]:
-            alerts.append(
-                "## Auto-start failed\n\n" + safe_text(error)
-                + "\n\nIf the request timed out, the instance may still have been created. "
-                "The next run checks for it by name before trying again."
-            )
-        changes["autostart_error"] = error
-        return changes, alerts, "Auto-start: FAILED. " + safe_text(error)
-    changes.update(autostart=label, autostart_error="", autostart_ran=False)
-    if existing is not None:
-        status = safe_text(existing.get("status") or "unknown")
-        if existing.get("name") != name:
-            # Track the live instance from an earlier attempt from now on.
-            name = existing["name"]
-            suffix = name[len(AUTOSTART_PREFIX + label):]
-            failures = int(suffix[1:]) - 1 if suffix else 0
-            tracked = {k: v for k, v in state["autostart_failures"].items() if k != label}
-            changes["autostart_failures"] = {**tracked, **({label: failures} if failures else {})}
-        return changes, alerts + [
-            f"## Auto-start skipped\n\nInstance `{name}` already exists (status: {status}), "
-            "so no second instance was created. Auto-start is now used for this label."
-        ], f"Auto-start: `{name}` already exists; nothing created."
+        alerts = [] if error == state["autostart_error"] else [
+            "## Auto-start failed\n\n" + safe_text(error)
+            + "\n\nIf the request timed out, the instance may still have been created. "
+            "The next run checks the instance list before trying again."
+        ]
+        return {"autostart_error": error}, alerts, "Auto-start: FAILED. " + safe_text(error)
+    if live is not None:
+        return {"autostart_error": ""}, [], (
+            f"Auto-start: on; `{safe_text(live.get('name'))}` is "
+            f"{safe_text(live.get('status') or 'unknown')}, so no other instance is started.")
     details = (
         "| Name | ID | Instance | GPU | Provider | Base price |\n"
         "| --- | --- | --- | --- | --- | --- |\n| " + " | ".join(safe_text(v) for v in (
@@ -409,11 +362,11 @@ def autostart(api_key, label, items, state):
             candidate["provider"], candidate["price"],
         )) + " |"
     )
-    return changes, alerts + [
+    return {"autostart_error": ""}, [
         "## Instance started\n\n" + details + "\n\n**Billing continues until you stop "
-        "or delete this instance in the Brev console.** Auto-start is now used; set "
-        "`BREV_AUTOSTART` to a new value to allow another start. If this instance "
-        "ends with status FAILURE, auto-start re-arms and tries again."
+        "or delete this instance in the Brev console.** When you are done, set "
+        "`BREV_AUTOSTART` to `off` **before** stopping or deleting it; while it is "
+        "`on`, a new instance starts as soon as this one is stopped or gone."
     ], "Auto-start: STARTED.\n\n" + details
 
 
@@ -444,9 +397,8 @@ def match_table(matches):
 
 def initial_state():
     return {
-        "version": 3, "matches": {}, "error": "", "expiry_notice": "",
-        "last_success": "", "autostart": "", "autostart_error": "",
-        "autostart_failures": {}, "autostart_ran": False,
+        "version": 4, "matches": {}, "error": "", "expiry_notice": "",
+        "last_success": "", "autostart_error": "",
     }
 
 
@@ -488,23 +440,18 @@ def decode_state(body):
         state = json.loads(raw)
     except json.JSONDecodeError:
         raise MonitorError("Monitor issue state is not valid JSON.") from None
-    if isinstance(state, dict) and state.get("version") == 1:
-        # Version 2 adds auto-start bookkeeping; version 1 never started anything.
-        state.update(version=2, autostart="", autostart_error="")
-    if isinstance(state, dict) and state.get("version") == 2:
-        # Version 3 counts failed instances per label and records whether the
-        # current instance ran; version 2 recorded neither.
-        state.update(version=3, autostart_failures={}, autostart_ran=False)
-    failures = state.get("autostart_failures") if isinstance(state, dict) else None
-    if (not isinstance(state, dict) or state.get("version") != 3
+    if isinstance(state, dict) and state.get("version") in (1, 2, 3):
+        # Versions 2 and 3 tracked arm labels; version 4 has an on/off flag and
+        # reads live instances from Brev, so only the error dedupe key remains.
+        for key in ("autostart", "autostart_failures", "autostart_ran"):
+            state.pop(key, None)
+        state["autostart_error"] = state.get("autostart_error", "")
+        state["version"] = 4
+    if (not isinstance(state, dict) or state.get("version") != 4
             or not isinstance(state.get("matches"), dict)
             or not all(isinstance(state.get(k), str)
                        for k in ("error", "expiry_notice", "last_success",
-                                 "autostart", "autostart_error"))
-            or type(state.get("autostart_ran")) is not bool
-            or not isinstance(failures, dict)
-            or not all(isinstance(k, str) and type(v) is int and v > 0
-                       for k, v in failures.items())
+                                 "autostart_error"))
             or not all(re.fullmatch(r"[a-f0-9]{32}", k)
                        and v in ("available", "unavailable", "unknown")
                        for k, v in state["matches"].items())):
@@ -639,7 +586,7 @@ def issue_body(state, summary, run_url):
         "A catalog listing or API availability flag does not guarantee that an "
         "instance can be rented. Prices are base prices and may vary by region; "
         "storage and other charges may be additional. An instance is created only "
-        "when auto-start is armed with `BREV_AUTOSTART`.\n\n"
+        "while the repository variable `BREV_AUTOSTART` is `on`.\n\n"
         "Do not delete this issue, change its title, or edit its hidden state. "
         "To stop monitoring, disable the workflow, rather than closing the issue.\n\n"
         + STATE_START + json.dumps(state, sort_keys=True) + STATE_END
@@ -671,14 +618,15 @@ def run_monitor(github, *, api_key, expires_on, notify_user, run_url, now,
     start_summary = "Auto-start: skipped because the catalog check failed."
     if not error:
         try:
-            label = autostart_label(autostart_value)
+            enabled = autostart_enabled(autostart_value)
         except MonitorError as exc:
             changes = {"autostart_error": str(exc)}
             start_alerts = ([] if str(exc) == state["autostart_error"]
                             else ["## Auto-start configuration\n\n" + safe_text(exc)])
             start_summary = safe_text(exc)
         else:
-            changes, start_alerts, start_summary = autostart(api_key, label, items, state)
+            changes, start_alerts, start_summary = autostart(
+                api_key, enabled, items, state, now)
         state.update(changes)
         alerts.extend(start_alerts)
     if error:

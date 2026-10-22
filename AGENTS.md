@@ -6,13 +6,13 @@ changes.
 
 ## Purpose and boundaries
 
-This is a Blackwell GPU catalog monitor for NVIDIA Brev with auto-start. At the
-owner's request, the workflow arms auto-start by default with label `1` when the
-`BREV_AUTOSTART` repository variable is unset; `0`/`false`/`off`/`no` disables it.
-It may create **at most one** instance per arm label (see "Auto-start invariants"). It must never create instances in any
-other path, never stop, delete, or modify instances, and never create one to
-test availability. Auto-start needs a Read & Write Brev API key; with it
-disarmed, a Read-only key is sufficient.
+This is a Blackwell GPU catalog monitor for NVIDIA Brev with an optional
+auto-start, controlled by the on/off repository variable `BREV_AUTOSTART`
+(off when unset). While on, it keeps **at most one** live auto-started instance
+(see "Auto-start invariants"). It must never create instances in any other path,
+never stop, delete, or modify instances, and never create one to test
+availability. Auto-start needs a Read & Write Brev API key; with it off, a
+Read-only key is sufficient.
 
 The production source is the organization associated with the API key, not a
 scraped browser page. Catalog presence and an API availability flag are not
@@ -65,7 +65,7 @@ paste a key into chat, command history, source files, or test fixtures.
 | `BREV_API_KEY` | Actions repository secret | Brev API key, `bak-` prefix; Read & Write for auto-start |
 | `BREV_API_KEY_EXPIRES_ON` | Actions repository variable | `YYYY-MM-DD` expiry date |
 | `NOTIFY_USER` | Optional Actions repository variable | Username without `@`; defaults to owner |
-| `BREV_AUTOSTART` | Optional Actions repository variable | Arm label; the workflow defaults it to `1`. `0`/`false`/`off`/`no` disables. The script treats an empty value as disabled |
+| `BREV_AUTOSTART` | Optional Actions repository variable | `on` (`1`/`true`/`yes`/`enabled`) or `off` (`0`/`false`/`no`/`disabled`, or unset). Other values alert and count as off |
 | `STATE_ISSUE` | Optional Actions repository variable | Number of the state issue; defaults to `1` |
 | `GITHUB_TOKEN` | Automatically supplied by Actions | Issue reads/writes in this repository |
 
@@ -128,11 +128,10 @@ Public catalog access is explicitly limited to `--dry-run --public-catalog`.
   issue `STATE_ISSUE` (default `1`) directly and uses it when its title and bot
   author match; only then does it fall back to the filtered and unfiltered
   listings, where the oldest match wins. Never rely on listings alone.
-- State schema version 3 contains `matches`, `error`, `expiry_notice`,
-  `last_success`, `autostart` (the consumed arm label), `autostart_error`,
-  `autostart_failures` (label to count of instances that never ran), and
-  `autostart_ran` (whether the current instance reached a running status).
-  Versions 1 and 2 are migrated in `decode_state`. A damaged
+- State schema version 4 contains `matches`, `error`, `expiry_notice`,
+  `last_success`, and `autostart_error` (dedupe key for auto-start alerts).
+  Versions 1-3 are migrated in `decode_state`; the arm-label fields of versions
+  2-3 are dropped because Brev's live instance list now decides. A damaged
   or unsupported state is an error, not an empty baseline. Schema changes
   require migration or an explicit recovery procedure.
 - Alert on a newly observed identity, reappearance after a successful absent
@@ -155,30 +154,26 @@ Public catalog access is explicitly limited to `--dry-run --public-catalog`.
 
 - Auto-start runs only in the scheduled/dispatched workflow path, never in
   `--dry-run`, and only after a successful catalog query. A catalog failure,
-  invalid `BREV_AUTOSTART`, or missing `cloudCredId` never creates anything.
+  invalid `BREV_AUTOSTART`, failed instance lookup, or missing `cloudCredId`
+  never creates anything.
 - Candidates are monitored matches (same B200/B300 single-GPU rules) whose
   listing has `isAvailable: true`, sorted cheapest base price first. There is
   intentionally no price cap; the owner chose this.
-- At most one instance per arm label that actually runs. The first instance is
-  `blackwell-auto-<label>`; after `n` failures it is `blackwell-auto-<label>-<n+1>`.
-  Before creating, list the organization's instances; an existing instance with
-  the current name consumes the label without creating another. This name check
-  is what makes reruns, crashes after creation, and failed notifications safe.
-  Before creating, any live (not `FAILURE`/`DELETING`) instance named
-  `blackwell-auto-<label>` or `blackwell-auto-<label>-<n>` also blocks creation
-  and becomes the tracked instance, so lost or reset state cannot start a
-  second GPU.
-- While a label is used, every run looks up its current instance. `RUNNING`,
-  `STOPPING`, or `STOPPED` sets `autostart_ran`; from then on the label stays
-  used forever, even if the instance is deleted or later fails. If the instance
-  never ran and is `FAILURE`, `DELETING`, or gone, increment the label's failure
-  count, clear `autostart`, alert, and select a replacement in the same run.
-  Any other status (such as `DEPLOYING`) waits. A lookup error never creates.
-- Never retry the creation `POST`. A failure leaves the label armed and alerts
-  once per distinct error; the next run rechecks by name before trying again.
-- After a start, record the label in state. The owner re-arms by setting
-  `BREV_AUTOSTART` to a new value. The monitor never stops or deletes instances;
-  notifications must say that billing continues until the owner stops it.
+- While on, keep at most one live auto-started instance. Before creating, list
+  the organization's instances. Any instance whose name starts with
+  `blackwell-auto-` and whose status is not in `GONE_STATUSES` (`STOPPED`,
+  `FAILURE`, `DELETING`) blocks creation; unknown statuses block too. Instances
+  without the prefix (created by the owner) are ignored.
+- The Brev instance list, not Issue state, is the source of truth, so reruns,
+  crashes after creation, failed notifications, and lost or duplicated state
+  cannot start a second instance. Name new instances
+  `blackwell-auto-<UTC YYYYmmdd-HHMMSS>`.
+- The owner chose "keep one": while on, stopping or deleting the instance frees
+  the slot and the next check may start another. The Instance started alert must
+  say to switch off before stopping, and that billing continues until stopped.
+- Never retry the creation `POST`. A failure alerts once per distinct error and
+  the next run checks the instance list again before trying. The monitor never
+  stops or deletes instances.
 
 ## Failure handling and credential safety
 

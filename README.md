@@ -2,10 +2,9 @@
 
 Checks the Brev GPU catalog on a schedule (a Cloudflare Cron Trigger, with
 GitHub's own schedule as a backup) and sends alerts through a GitHub
-Issue in this repository. [Auto-start](#auto-start) is **on by default**:
-it starts **one** B200/B300 single-GPU instance when one becomes available, which
-**incurs GPU rental charges** until you stop it. Set `BREV_AUTOSTART` to `0` to
-only receive notifications.
+Issue in this repository. Optional [auto-start](#auto-start), off by default,
+keeps **one** B200/B300 single-GPU instance running while switched on, which
+**incurs GPU rental charges** until you stop it.
 
 This README is for human users. Coding agents should read [AGENTS.md](AGENTS.md)
 before making changes.
@@ -70,39 +69,40 @@ alert rather than risk losing it.
 
 ## Auto-start
 
-On by default and requires a **Read & Write** `BREV_API_KEY`. Without a
-`BREV_AUTOSTART` repository variable, the workflow uses the arm label `1`. To
-use another label, set `BREV_AUTOSTART` to 1-20 lowercase letters, digits, or
-hyphens.
+`BREV_AUTOSTART` is an on/off switch, set as an Actions repository variable. It
+is **off** when the variable is missing. Auto-start requires a **Read & Write**
+`BREV_API_KEY`.
 
-On the next successful check where a monitored configuration (B200/B300, single
-GPU) is listed with API availability `available`, the monitor creates one
-instance named `blackwell-auto-<label>` using the cheapest such listing. There is
-**no price cap**. It uses the same defaults as `brev create`: VM mode with
-Jupyter and a 120 GiB disk. You are mentioned in an **Instance started** comment
-with the instance ID, type, and base price.
+```bash
+gh variable set BREV_AUTOSTART --body on  -R JigaoLuo/brev-blackwell-monitor
+gh variable set BREV_AUTOSTART --body off -R JigaoLuo/brev-blackwell-monitor
+```
 
-- **One running instance per label.** Once the started instance reaches
-  `RUNNING` (or later `STOPPED`), that label is used up for good, even after you
-  delete the instance. To allow another start, change `BREV_AUTOSTART` to a new
-  value such as `2`.
-- **Failed deployments retry.** If the started instance ends with `FAILURE`, or
-  disappears, without ever running, you get a **Started instance failed** alert
-  and auto-start re-arms. The next available listing starts
-  `blackwell-auto-<label>-2`, then `-3`, and so on. Failed instances are left in
-  Brev for you to inspect or delete.
-- **Duplicate protection.** Before creating, the monitor checks whether an
-  instance named `blackwell-auto-<label>` already exists. Reruns, crashes, or
-  failed notifications therefore cannot start a second instance for the same label.
-- **Failures.** A failed start (for example, capacity disappeared) is reported
-  once and retried on the next run. Creation requests are never retried within a
-  run. If a request timed out, check the Brev console; the next run detects the
-  instance by name.
-- **Billing.** The monitor never stops or deletes instances. Stop or delete the
-  instance in the Brev console when you are done.
-- To disable, add the repository variable `BREV_AUTOSTART` with value `0`
-  (`false`, `off`, or `no` also work). Deleting the variable turns auto-start
-  back on with label `1`. `--dry-run` never starts instances.
+`on` also accepts `1`, `true`, `yes`, `enabled`; `off` also accepts `0`,
+`false`, `no`, `disabled`. Any other value is reported and treated as `off`.
+
+- **off**: the monitor keeps checking and notifying, but never starts anything.
+- **on**: keeps exactly one auto-started instance. On each check, if no instance
+  started by the monitor is live and a monitored configuration (B200/B300, single
+  GPU) is listed as `available`, it creates one from the cheapest such listing.
+  There is **no price cap**. You are mentioned in an **Instance started** comment
+  with the instance ID, type, and base price.
+
+The monitor recognizes its own instances by the `blackwell-auto-` name prefix and
+picks the names itself. An instance that is `STOPPED`, `FAILURE`, `DELETING`, or
+gone frees the slot; any other status (running, deploying, starting, stopping)
+blocks a second one. Instances you create yourself are ignored.
+
+**When you are done, set the switch to `off` first, then stop or delete the
+instance.** While it is `on`, stopping or deleting the instance lets the next
+check start a new one, and billing starts again.
+
+- The check uses Brev's live instance list, so reruns, crashes, or lost Issue
+  state cannot start a second instance.
+- A failed start (for example, capacity disappeared) is reported once and tried
+  again on the next check. Creation requests are never retried within a run.
+- The monitor never stops or deletes instances. Billing continues until you do.
+- `--dry-run` never starts instances.
 
 ## Schedule and usage
 
