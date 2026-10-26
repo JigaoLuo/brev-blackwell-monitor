@@ -31,6 +31,8 @@ GPU_COUNT = 1
 AUTOSTART_PREFIX = "blackwell-auto-"
 AUTOSTART_OFF = ("", "0", "false", "off", "no", "disabled")
 AUTOSTART_ON = ("1", "true", "on", "yes", "enabled")
+# Values that restrict auto-start to one monitored model; monitoring is unchanged.
+AUTOSTART_MODELS = ("b200", "b300")
 WORKSPACE_CLASS_ID = "2x8"
 WORKSPACE_TEMPLATE_ID = "4nbb4lg2s"
 WORKSPACE_DISK = "120Gi"
@@ -237,22 +239,31 @@ def find_blackwell(items):
     return sorted(matches.values(), key=lambda m: (m.gpu, m.provider, m.instance_type))
 
 
-def autostart_enabled(value):
+def autostart_mode(value):
+    """Return None (off), "any" (cheapest B200 or B300), "B200", or "B300"."""
     flag = value.strip().lower()
     if flag in AUTOSTART_OFF:
-        return False
+        return None
     if flag in AUTOSTART_ON:
-        return True
-    raise MonitorError("BREV_AUTOSTART must be `on` or `off`; auto-start is off.")
+        return "any"
+    if flag in AUTOSTART_MODELS:
+        return flag.upper()
+    raise MonitorError("BREV_AUTOSTART must be `off`, `on`, `b200`, or `b300`; "
+                       "auto-start is off.")
 
 
-def autostart_candidates(items):
-    """Return available monitored configurations, cheapest first."""
+def autostart_candidates(items, model=None):
+    """Return available monitored configurations, cheapest first.
+
+    With `model` ("B200" or "B300"), only that GPU model is returned.
+    """
     candidates = []
     for item in items:
         if not item.get("supportedGpus") or item.get("isAvailable") is not True:
             continue
         for match in find_blackwell([item]):
+            if model and not re.search(rf"\b{model}\b", match.gpu, re.IGNORECASE):
+                continue
             price = item.get("basePrice") or {}
             try:
                 cost = float(price.get("amount", ""))
@@ -321,18 +332,20 @@ def live_instance(workspaces):
     return None
 
 
-def autostart(api_key, enabled, items, state, now):
-    """While enabled, keep one auto-started instance; start one if none is live.
+def autostart(api_key, mode, items, state, now):
+    """While on, keep one auto-started instance; start one if none is live.
 
-    The Brev instance list, not the issue state, decides whether one is live,
-    so lost state or a crash after creation cannot start a second instance.
-    Return (state changes, alerts, summary).
+    `mode` comes from `autostart_mode`. The Brev instance list, not the issue
+    state, decides whether one is live, so lost state or a crash after creation
+    cannot start a second instance. Return (state changes, alerts, summary).
     """
-    if not enabled:
+    if mode is None:
         return {}, [], "Auto-start: off."
-    candidates = autostart_candidates(items)
+    model = None if mode == "any" else mode
+    wanted = model or "B200/B300"
+    candidates = autostart_candidates(items, model)
     if not candidates:
-        return {}, [], "Auto-start: on; no available single B200/B300 listing."
+        return {}, [], f"Auto-start: on for {wanted}; no available single {wanted} listing."
     candidate = candidates[0]
     try:
         org_id = resolve_org(api_key)
@@ -353,7 +366,7 @@ def autostart(api_key, enabled, items, state, now):
         return {"autostart_error": error}, alerts, "Auto-start: FAILED. " + safe_text(error)
     if live is not None:
         return {"autostart_error": ""}, [], (
-            f"Auto-start: on; `{safe_text(live.get('name'))}` is "
+            f"Auto-start: on for {wanted}; `{safe_text(live.get('name'))}` is "
             f"{safe_text(live.get('status') or 'unknown')}, so no other instance is started.")
     details = (
         "| Name | ID | Instance | GPU | Provider | Base price |\n"
@@ -618,7 +631,7 @@ def run_monitor(github, *, api_key, expires_on, notify_user, run_url, now,
     start_summary = "Auto-start: skipped because the catalog check failed."
     if not error:
         try:
-            enabled = autostart_enabled(autostart_value)
+            mode = autostart_mode(autostart_value)
         except MonitorError as exc:
             changes = {"autostart_error": str(exc)}
             start_alerts = ([] if str(exc) == state["autostart_error"]
@@ -626,7 +639,7 @@ def run_monitor(github, *, api_key, expires_on, notify_user, run_url, now,
             start_summary = safe_text(exc)
         else:
             changes, start_alerts, start_summary = autostart(
-                api_key, enabled, items, state, now)
+                api_key, mode, items, state, now)
         state.update(changes)
         alerts.extend(start_alerts)
     if error:

@@ -69,24 +69,31 @@ alert rather than risk losing it.
 
 ## Auto-start
 
-`BREV_AUTOSTART` is an on/off switch, set as an Actions repository variable. It
-is **off** when the variable is missing. Auto-start requires a **Read & Write**
-`BREV_API_KEY`.
+`BREV_AUTOSTART` is a switch set as an Actions repository variable. It is
+**off** when the variable is missing. Auto-start requires a **Read & Write**
+`BREV_API_KEY`. Monitoring and notifications always cover both B200 and B300;
+the switch only decides what may be started.
+
+| Value | Starts |
+| --- | --- |
+| `off` (default) | nothing |
+| `b200` | only a single-GPU B200 |
+| `b300` | only a single-GPU B300 |
+| `on` | the cheapest available single-GPU B200 or B300 |
 
 ```bash
-gh variable set BREV_AUTOSTART --body on  -R JigaoLuo/brev-blackwell-monitor
-gh variable set BREV_AUTOSTART --body off -R JigaoLuo/brev-blackwell-monitor
+gh variable set BREV_AUTOSTART --body b300 -R JigaoLuo/brev-blackwell-monitor
+gh variable set BREV_AUTOSTART --body off  -R JigaoLuo/brev-blackwell-monitor
 ```
 
 `on` also accepts `1`, `true`, `yes`, `enabled`; `off` also accepts `0`,
 `false`, `no`, `disabled`. Any other value is reported and treated as `off`.
 
-- **off**: the monitor keeps checking and notifying, but never starts anything.
-- **on**: keeps exactly one auto-started instance. On each check, if no instance
-  started by the monitor is live and a monitored configuration (B200/B300, single
-  GPU) is listed as `available`, it creates one from the cheapest such listing.
-  There is **no price cap**. You are mentioned in an **Instance started** comment
-  with the instance ID, type, and base price.
+Whenever the switch is not `off`, the monitor keeps exactly one auto-started
+instance. On each check, if no instance started by the monitor is live and an
+allowed configuration is listed as `available`, it creates one from the cheapest
+such listing. There is **no price cap**. You are mentioned in an
+**Instance started** comment with the instance ID, type, and base price.
 
 The monitor recognizes its own instances by the `blackwell-auto-` name prefix and
 picks the names itself. An instance that is `STOPPED`, `FAILURE`, `DELETING`, or
@@ -94,7 +101,7 @@ gone frees the slot; any other status (running, deploying, starting, stopping)
 blocks a second one. Instances you create yourself are ignored.
 
 **When you are done, set the switch to `off` first, then stop or delete the
-instance.** While it is `on`, stopping or deleting the instance lets the next
+instance.** While it is not `off`, stopping or deleting the instance lets the next
 check start a new one, and billing starts again.
 
 - The check uses Brev's live instance list, so reruns, crashes, or lost Issue

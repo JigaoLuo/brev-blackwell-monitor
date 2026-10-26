@@ -7,8 +7,9 @@ changes.
 ## Purpose and boundaries
 
 This is a Blackwell GPU catalog monitor for NVIDIA Brev with an optional
-auto-start, controlled by the on/off repository variable `BREV_AUTOSTART`
-(off when unset). While on, it keeps **at most one** live auto-started instance
+auto-start, controlled by the repository variable `BREV_AUTOSTART`: `off`
+(default when unset), `on` (either model), `b200`, or `b300`. Monitoring always
+covers both models. While not off, it keeps **at most one** live auto-started instance
 (see "Auto-start invariants"). It must never create instances in any other path,
 never stop, delete, or modify instances, and never create one to test
 availability. Auto-start needs a Read & Write Brev API key; with it off, a
@@ -65,7 +66,7 @@ paste a key into chat, command history, source files, or test fixtures.
 | `BREV_API_KEY` | Actions repository secret | Brev API key, `bak-` prefix; Read & Write for auto-start |
 | `BREV_API_KEY_EXPIRES_ON` | Actions repository variable | `YYYY-MM-DD` expiry date |
 | `NOTIFY_USER` | Optional Actions repository variable | Username without `@`; defaults to owner |
-| `BREV_AUTOSTART` | Optional Actions repository variable | `on` (`1`/`true`/`yes`/`enabled`) or `off` (`0`/`false`/`no`/`disabled`, or unset). Other values alert and count as off |
+| `BREV_AUTOSTART` | Optional Actions repository variable | `off` (`0`/`false`/`no`/`disabled`, or unset), `on` (`1`/`true`/`yes`/`enabled`; cheapest B200 or B300), `b200`, or `b300`. Other values alert and count as off |
 | `STATE_ISSUE` | Optional Actions repository variable | Number of the state issue; defaults to `1` |
 | `GITHUB_TOKEN` | Automatically supplied by Actions | Issue reads/writes in this repository |
 
@@ -157,9 +158,11 @@ Public catalog access is explicitly limited to `--dry-run --public-catalog`.
   invalid `BREV_AUTOSTART`, failed instance lookup, or missing `cloudCredId`
   never creates anything.
 - Candidates are monitored matches (same B200/B300 single-GPU rules) whose
-  listing has `isAvailable: true`, sorted cheapest base price first. There is
-  intentionally no price cap; the owner chose this.
-- While on, keep at most one live auto-started instance. Before creating, list
+  listing has `isAvailable: true`, sorted cheapest base price first. `b200` or
+  `b300` (`autostart_mode`) restricts candidates to that model only; it never
+  changes monitoring or notifications. There is intentionally no price cap; the
+  owner chose this.
+- While not off, keep at most one live auto-started instance. Before creating, list
   the organization's instances. Any instance whose name starts with
   `blackwell-auto-` and whose status is not in `GONE_STATUSES` (`STOPPED`,
   `FAILURE`, `DELETING`) blocks creation; unknown statuses block too. Instances
@@ -168,7 +171,7 @@ Public catalog access is explicitly limited to `--dry-run --public-catalog`.
   crashes after creation, failed notifications, and lost or duplicated state
   cannot start a second instance. Name new instances
   `blackwell-auto-<UTC YYYYmmdd-HHMMSS>`.
-- The owner chose "keep one": while on, stopping or deleting the instance frees
+- The owner chose "keep one": while not off, stopping or deleting the instance frees
   the slot and the next check may start another. The Instance started alert must
   say to switch off before stopping, and that billing continues until stopped.
 - Never retry the creation `POST`. A failure alerts once per distinct error and

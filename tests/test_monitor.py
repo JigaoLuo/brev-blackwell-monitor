@@ -422,12 +422,48 @@ class AutostartTests(unittest.TestCase):
 
     def test_flag_parsing(self):
         for value in ("", " ", "0", "false", "OFF", "no", "disabled"):
-            self.assertFalse(m.autostart_enabled(value))
+            self.assertIsNone(m.autostart_mode(value))
         for value in ("1", "true", " On ", "yes", "enabled"):
-            self.assertTrue(m.autostart_enabled(value))
-        for value in ("2", "maybe", "on;rm"):
+            self.assertEqual(m.autostart_mode(value), "any")
+        self.assertEqual(m.autostart_mode("b200"), "B200")
+        self.assertEqual(m.autostart_mode(" B300 "), "B300")
+        for value in ("2", "maybe", "on;rm", "gb200", "b100", "h100"):
             with self.subTest(value=value), self.assertRaises(m.MonitorError):
-                m.autostart_enabled(value)
+                m.autostart_mode(value)
+
+    def test_model_flag_starts_only_that_model(self):
+        b300 = instance("B300", type="b300-1x", cloudCredId="c3",
+                        basePrice={"currency": "USD", "amount": "9.00"})
+        b200 = instance("NVIDIA B200", type="b200-1x", cloudCredId="c2")
+        for value, catalog, expected in (
+            ("b300", [b200, b300], "b300-1x"),
+            ("b200", [b300, b200], "b200-1x"),
+            ("on", [b300, b200], "b200-1x"),
+        ):
+            with self.subTest(value=value):
+                with patch.object(m, "fetch_catalog", return_value=catalog), \
+                        self.brev(workspaces=[]) as request:
+                    m.run_monitor(self.github, **dict(self.kwargs, autostart_value=value))
+                create, = self.creates(request)
+                self.assertEqual(create.kwargs["body"]["instanceType"], expected)
+
+    def test_model_flag_waits_while_only_the_other_model_is_available(self):
+        b200 = instance("B200", type="b200-1x", cloudCredId="c2")
+        with patch.object(m, "fetch_catalog", return_value=[b200]), \
+                self.brev(workspaces=[]) as request:
+            m.run_monitor(self.github, **dict(self.kwargs, autostart_value="b300"))
+        request.assert_not_called()
+        body = self.github.update_issue.call_args.args[1]
+        self.assertIn("Auto-start: on for B300; no available single B300 listing.", body)
+        # Monitoring still reports the B200 listing.
+        self.assertIn("| B200 |", body)
+
+    @patch.object(m, "fetch_catalog", return_value=[instance("B300", cloudCredId="c")])
+    def test_model_flag_still_allows_only_one_live_instance(self, _fetch):
+        live = [{"name": "blackwell-auto-x", "status": "RUNNING"}]
+        with self.brev(workspaces=live) as request:
+            m.run_monitor(self.github, **dict(self.kwargs, autostart_value="b300"))
+        self.assertEqual(self.creates(request), [])
 
     def test_candidates_are_available_single_gpu_cheapest_first(self):
         items = [
@@ -504,7 +540,8 @@ class AutostartTests(unittest.TestCase):
         with self.brev(workspaces=[]) as request:
             m.run_monitor(self.github, **dict(self.kwargs, autostart_value="2"))
         request.assert_not_called()
-        self.assertIn("must be `on` or `off`", self.github.comment.call_args.args[1])
+        self.assertIn("must be `off`, `on`, `b200`, or `b300`",
+                      self.github.comment.call_args.args[1])
 
     @patch.object(m, "fetch_catalog", return_value=[instance(cloudCredId="cred1")])
     def test_instance_list_failure_does_not_create(self, _fetch):
@@ -536,7 +573,8 @@ class AutostartTests(unittest.TestCase):
         with self.brev(workspaces=[]) as request:
             m.run_monitor(self.github, **self.kwargs)
         request.assert_not_called()
-        self.assertIn("Auto-start: on; no available", self.github.update_issue.call_args.args[1])
+        self.assertIn("Auto-start: on for B200/B300; no available",
+                      self.github.update_issue.call_args.args[1])
 
     @patch.object(m, "fetch_catalog", side_effect=m.MonitorError("Brev GPU catalog: HTTP 500."))
     def test_catalog_failure_never_starts(self, _fetch):
