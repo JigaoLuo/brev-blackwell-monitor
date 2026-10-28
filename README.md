@@ -96,9 +96,13 @@ such listing. There is **no price cap**. You are mentioned in an
 **Instance started** comment with the instance ID, type, and base price.
 
 The monitor recognizes its own instances by the `blackwell-auto-` name prefix and
-picks the names itself. An instance that is `STOPPED`, `FAILURE`, `DELETING`, or
-gone frees the slot; any other status (running, deploying, starting, stopping)
-blocks a second one. Instances you create yourself are ignored.
+picks the names itself. Only an instance that is running, deploying, starting,
+or stopping blocks a second one. A failed provisioning (`FAILURE`), a stopped or
+deleted instance, or any unrecognized status frees the slot, so a start that
+never came up does not block the next one. An instance still deploying or
+starting 60 minutes after it was created is treated as failed. Instances you
+create yourself are ignored. While the switch is not `off`, each run's summary
+lists the auto-started instances and their statuses.
 
 **When you are done, set the switch to `off` first, then stop or delete the
 instance.** While it is not `off`, stopping or deleting the instance lets the next

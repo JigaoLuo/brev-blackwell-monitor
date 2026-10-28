@@ -163,10 +163,16 @@ Public catalog access is explicitly limited to `--dry-run --public-catalog`.
   changes monitoring or notifications. There is intentionally no price cap; the
   owner chose this.
 - While not off, keep at most one live auto-started instance. Before creating, list
-  the organization's instances. Any instance whose name starts with
-  `blackwell-auto-` and whose status is not in `GONE_STATUSES` (`STOPPED`,
-  `FAILURE`, `DELETING`) blocks creation; unknown statuses block too. Instances
-  without the prefix (created by the owner) are ignored.
+  the organization's instances. Only an instance whose name starts with
+  `blackwell-auto-` and whose status is in `LIVE_STATUSES` (`RUNNING`,
+  `STARTING`, `DEPLOYING`, `STOPPING`) blocks creation. `FAILURE`, `STOPPED`,
+  `DELETING`, missing, and unknown statuses never block: on 2026-10-28 a started
+  B200 failed to provision, and the owner requires that such a false positive
+  never blocks the next start. An instance still `DEPLOYING`/`STARTING` more
+  than `STUCK_AFTER` (60 min) after the creation time encoded in its name is
+  treated as failed. Instances without the prefix (created by the owner) are
+  ignored. While on, every run lists the auto-started instances and their
+  statuses in the summary, even when nothing is available.
 - The Brev instance list, not Issue state, is the source of truth, so reruns,
   crashes after creation, failed notifications, and lost or duplicated state
   cannot start a second instance. Name new instances

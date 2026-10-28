@@ -3,7 +3,7 @@
 import argparse
 import copy
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import html
 import json
@@ -37,9 +37,13 @@ WORKSPACE_CLASS_ID = "2x8"
 WORKSPACE_TEMPLATE_ID = "4nbb4lg2s"
 WORKSPACE_DISK = "120Gi"
 # Brev workspace statuses (brev-cli entity.go) of an auto-started instance that
-# no longer occupies the single slot. Every other status, including unknown
-# ones, counts as live so that a new instance is never started beside it.
-GONE_STATUSES = ("STOPPED", "FAILURE", "DELETING")
+# still occupies the single slot. FAILURE, STOPPED, DELETING, and any unknown
+# status do not: a provisioning failure must never block the next start.
+LIVE_STATUSES = ("RUNNING", "STARTING", "DEPLOYING", "STOPPING")
+# An instance still starting this long after its creation (encoded in its name)
+# is treated as a failed provisioning that will not come up.
+STARTUP_STATUSES = ("STARTING", "DEPLOYING")
+STUCK_AFTER = timedelta(minutes=60)
 
 
 # Brev's catalog RPC sometimes stalls for tens of seconds shortly after the hour.
@@ -323,13 +327,24 @@ def create_workspace(api_key, org_id, candidate, name):
     return workspace
 
 
-def live_instance(workspaces):
-    """Return an auto-started instance that still occupies the slot, or None."""
-    for workspace in workspaces:
-        if (str(workspace.get("name", "")).startswith(AUTOSTART_PREFIX)
-                and workspace.get("status") not in GONE_STATUSES):
-            return workspace
-    return None
+def instance_created_at(name):
+    """Return the UTC creation time encoded in an auto-start name, or None."""
+    try:
+        return datetime.strptime(name[len(AUTOSTART_PREFIX):], "%Y%m%d-%H%M%S").replace(
+            tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def instance_state(workspace, now):
+    """Return (status text, whether it occupies the slot) for an instance."""
+    status = str(workspace.get("status") or "unknown")
+    if status not in LIVE_STATUSES:
+        return status, False
+    created = instance_created_at(str(workspace.get("name", "")))
+    if status in STARTUP_STATUSES and created and now - created > STUCK_AFTER:
+        return f"{status} for over {STUCK_AFTER.seconds // 60} min, treated as failed", False
+    return status, True
 
 
 def autostart(api_key, mode, items, state, now):
@@ -337,25 +352,48 @@ def autostart(api_key, mode, items, state, now):
 
     `mode` comes from `autostart_mode`. The Brev instance list, not the issue
     state, decides whether one is live, so lost state or a crash after creation
-    cannot start a second instance. Return (state changes, alerts, summary).
+    cannot start a second instance. Only clearly live instances block a start;
+    failed, stopped, unknown, or stuck ones never do. Every run while on lists
+    the auto-started instances in the summary. Return (state changes, alerts,
+    summary).
     """
     if mode is None:
         return {}, [], "Auto-start: off."
     model = None if mode == "any" else mode
     wanted = model or "B200/B300"
     candidates = autostart_candidates(items, model)
-    if not candidates:
-        return {}, [], f"Auto-start: on for {wanted}; no available single {wanted} listing."
-    candidate = candidates[0]
     try:
         org_id = resolve_org(api_key)
-        live = live_instance(list_workspaces(api_key, org_id))
-        if live is None:
-            if not isinstance(candidate["cloud_cred_id"], str) or not candidate["cloud_cred_id"]:
-                raise MonitorError("Brev GPU catalog: available listing has no cloudCredId; "
-                                   "update the monitor.")
-            name = AUTOSTART_PREFIX + now.strftime("%Y%m%d-%H%M%S")
-            workspace = create_workspace(api_key, org_id, candidate, name)
+        workspaces = list_workspaces(api_key, org_id)
+    except MonitorError as exc:
+        if not candidates:
+            # Nothing could be started anyway; report without alerting.
+            return {}, [], (f"Auto-start: on for {wanted}; no available single {wanted} "
+                            f"listing. Instance list unavailable: {safe_text(exc)}")
+        workspaces = exc
+    if not isinstance(workspaces, MonitorError):
+        own = [w for w in workspaces if str(w.get("name", "")).startswith(AUTOSTART_PREFIX)]
+        states = [(w, *instance_state(w, now)) for w in own]
+        listing = "; ".join(f"`{safe_text(w.get('name'))}` {safe_text(text)}"
+                            for w, text, _ in states) or "none"
+        live = next((w for w, _, occupies in states if occupies), None)
+        if live is not None:
+            return {"autostart_error": ""}, [], (
+                f"Auto-start: on for {wanted}; `{safe_text(live.get('name'))}` is "
+                f"{safe_text(live.get('status'))}, so no other instance is started. "
+                f"Auto-started instances: {listing}.")
+        if not candidates:
+            return {}, [], (f"Auto-start: on for {wanted}; no available single {wanted} "
+                            f"listing. Auto-started instances: {listing}.")
+    candidate = candidates[0]
+    try:
+        if isinstance(workspaces, MonitorError):
+            raise workspaces
+        if not isinstance(candidate["cloud_cred_id"], str) or not candidate["cloud_cred_id"]:
+            raise MonitorError("Brev GPU catalog: available listing has no cloudCredId; "
+                               "update the monitor.")
+        name = AUTOSTART_PREFIX + now.strftime("%Y%m%d-%H%M%S")
+        workspace = create_workspace(api_key, org_id, candidate, name)
     except MonitorError as exc:
         error = str(exc)
         alerts = [] if error == state["autostart_error"] else [
@@ -364,10 +402,6 @@ def autostart(api_key, mode, items, state, now):
             "The next run checks the instance list before trying again."
         ]
         return {"autostart_error": error}, alerts, "Auto-start: FAILED. " + safe_text(error)
-    if live is not None:
-        return {"autostart_error": ""}, [], (
-            f"Auto-start: on for {wanted}; `{safe_text(live.get('name'))}` is "
-            f"{safe_text(live.get('status') or 'unknown')}, so no other instance is started.")
     details = (
         "| Name | ID | Instance | GPU | Provider | Base price |\n"
         "| --- | --- | --- | --- | --- | --- |\n| " + " | ".join(safe_text(v) for v in (
@@ -375,11 +409,15 @@ def autostart(api_key, mode, items, state, now):
             candidate["provider"], candidate["price"],
         )) + " |"
     )
+    replaced = "".join(
+        f"\n\nPrevious auto-started instance `{safe_text(w.get('name'))}`: "
+        f"{safe_text(text)}; it no longer blocks a start." for w, text, _ in states)
     return {"autostart_error": ""}, [
         "## Instance started\n\n" + details + "\n\n**Billing continues until you stop "
         "or delete this instance in the Brev console.** When you are done, set "
         "`BREV_AUTOSTART` to `off` **before** stopping or deleting it; while it is "
-        "`on`, a new instance starts as soon as this one is stopped or gone."
+        "`on`, a new instance starts as soon as this one is stopped, failed, or gone."
+        + replaced
     ], "Auto-start: STARTED.\n\n" + details
 
 

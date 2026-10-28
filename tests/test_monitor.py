@@ -1,5 +1,5 @@
 import copy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import io
 import json
 from pathlib import Path
@@ -452,7 +452,7 @@ class AutostartTests(unittest.TestCase):
         with patch.object(m, "fetch_catalog", return_value=[b200]), \
                 self.brev(workspaces=[]) as request:
             m.run_monitor(self.github, **dict(self.kwargs, autostart_value="b300"))
-        request.assert_not_called()
+        self.assertEqual(self.creates(request), [])
         body = self.github.update_issue.call_args.args[1]
         self.assertIn("Auto-start: on for B300; no available single B300 listing.", body)
         # Monitoring still reports the B200 listing.
@@ -499,7 +499,7 @@ class AutostartTests(unittest.TestCase):
 
     @patch.object(m, "fetch_catalog", return_value=[instance(cloudCredId="cred1")])
     def test_live_instance_blocks_a_second(self, _fetch):
-        for status in ("DEPLOYING", "STARTING", "RUNNING", "STOPPING", None, "SOMETHING_NEW"):
+        for status in ("DEPLOYING", "STARTING", "RUNNING", "STOPPING"):
             with self.subTest(status=status):
                 live = [{"name": "blackwell-auto-old", "status": status}]
                 with self.brev(workspaces=live) as request:
@@ -513,11 +513,58 @@ class AutostartTests(unittest.TestCase):
         for workspaces in ([{"name": "blackwell-auto-old", "status": "STOPPED"}],
                            [{"name": "blackwell-auto-old", "status": "FAILURE"}],
                            [{"name": "blackwell-auto-old", "status": "DELETING"}],
+                           [{"name": "blackwell-auto-old", "status": None}],
+                           [{"name": "blackwell-auto-old", "status": "SOMETHING_NEW"}],
                            []):
             with self.subTest(workspaces=workspaces):
                 with self.brev(workspaces=workspaces) as request:
                     m.run_monitor(self.github, **self.kwargs)
                 self.assertEqual(len(self.creates(request)), 1)
+
+    @patch.object(m, "fetch_catalog", return_value=[instance(cloudCredId="cred1")])
+    def test_failed_provisioning_never_blocks_and_is_reported(self, _fetch):
+        failed = [{"name": "blackwell-auto-20261028-095049", "status": "FAILURE"}]
+        with self.brev(workspaces=failed) as request:
+            m.run_monitor(self.github, **self.kwargs)
+        self.assertEqual(len(self.creates(request)), 1)
+        comment = self.github.comment.call_args.args[1]
+        self.assertIn("`blackwell-auto-20261028-095049`: FAILURE; it no longer blocks", comment)
+
+    @patch.object(m, "fetch_catalog", return_value=[instance(cloudCredId="cred1")])
+    def test_instance_stuck_starting_stops_blocking_after_an_hour(self, _fetch):
+        for minutes, status, creates in ((59, "DEPLOYING", 0), (61, "DEPLOYING", 1),
+                                         (61, "STARTING", 1), (600, "RUNNING", 0)):
+            with self.subTest(minutes=minutes, status=status):
+                name = "blackwell-auto-" + (NOW - timedelta(minutes=minutes)).strftime(
+                    "%Y%m%d-%H%M%S")
+                with self.brev(workspaces=[{"name": name, "status": status}]) as request:
+                    m.run_monitor(self.github, **self.kwargs)
+                self.assertEqual(len(self.creates(request)), creates)
+        # Names without a timestamp (older instances) are never treated as stuck.
+        with self.brev(workspaces=[{"name": "blackwell-auto-1-2", "status": "DEPLOYING"}]) as r:
+            m.run_monitor(self.github, **self.kwargs)
+        self.assertEqual(self.creates(r), [])
+
+    @patch.object(m, "fetch_catalog", return_value=[instance(available=False, cloudCredId="c")])
+    def test_summary_lists_auto_instances_even_without_a_listing(self, _fetch):
+        own = [{"name": "blackwell-auto-20261028-095049", "status": "FAILURE"},
+               {"name": "my-own", "status": "RUNNING"}]
+        with self.brev(workspaces=own):
+            m.run_monitor(self.github, **dict(self.kwargs, autostart_value="b200"))
+        body = self.github.update_issue.call_args.args[1]
+        self.assertIn("Auto-started instances: `blackwell-auto-20261028-095049` FAILURE.", body)
+        self.assertNotIn("my-own", body)
+
+    @patch.object(m, "fetch_catalog", return_value=[instance(available=False, cloudCredId="c")])
+    def test_instance_list_failure_without_listing_does_not_alert(self, _fetch):
+        def fake(method, url, **kwargs):
+            if url == m.BREV_ORGS_URL:
+                return [{"id": "org1"}]
+            raise m.MonitorError("Brev instance list: HTTP 500.")
+        with patch.object(m, "request_json", side_effect=fake):
+            m.run_monitor(self.github, **self.kwargs)
+        self.assertNotIn("Auto-start failed", self.github.comment.call_args.args[1])
+        self.assertIn("Instance list unavailable", self.github.update_issue.call_args.args[1])
 
     @patch.object(m, "fetch_catalog", return_value=[instance(cloudCredId="cred1")])
     def test_manual_instances_are_ignored(self, _fetch):
@@ -572,7 +619,8 @@ class AutostartTests(unittest.TestCase):
     def test_unavailable_listing_is_not_started(self, _fetch):
         with self.brev(workspaces=[]) as request:
             m.run_monitor(self.github, **self.kwargs)
-        request.assert_not_called()
+        self.assertEqual(self.creates(request), [])
+        self.assertIn("Auto-started instances: none.", self.github.update_issue.call_args.args[1])
         self.assertIn("Auto-start: on for B200/B300; no available",
                       self.github.update_issue.call_args.args[1])
 
